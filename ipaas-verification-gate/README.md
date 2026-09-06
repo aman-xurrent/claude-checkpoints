@@ -16,7 +16,8 @@ the harness cannot. The gate is that obligation.
 
 **Revert proof.** Claude names the spec example that proves its change in
 `.claude/proof/declaration.json`. Writing that file launches a detached prover. The prover
-reverts the non-spec hunks in an isolated worktree, runs the named example and requires it
+reverts every hunk outside the example files (`*_spec.rb`, `*.test.*`), spec helpers and
+support files included, in an isolated worktree, runs the named example and requires it
 to FAIL, restores the change and requires it to PASS, then runs the spec file under three
 random seeds and requires it to stay green. A spec that passes with the fix reverted is
 reported as `vacuous`. A unit-tier proof takes about 30 seconds.

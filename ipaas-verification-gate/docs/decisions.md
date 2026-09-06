@@ -108,6 +108,14 @@ fails with `Key permanently revoked`. Main passes only because `spec_git_helper.
 committed key rows in a `before(:all)` and they carry today's date suffix. Fix: clear both key
 caches before each example. Proven 18/18.
 
+Applied 2026-09-07 in the worktree `~/work/ipaas_worktrees/spec-cache-leaks` (branch
+`worktree/spec-cache-leaks`, base `origin/main` 05688096), written and not committed. The
+regression example in `encryptor_provider_spec.rb` ('starts every example with empty key caches')
+encrypts in a `before(:context)` inside a transaction it rolls back, so both caches hold keys whose
+rows are gone, then round-trips in the example. Proof `20260906T195500Z-49743da06747`: red fails
+with `Key permanently revoked`, green passes, seeds 11/22/33 green. The connector gem's own
+`spec/spec_helper.rb:21-22` already clears both caches per example; the platform helper now matches.
+
 Retraction: the first diagnosis blamed `SystemKeyProvider.memcache` alone and was written to
 memory before it was proven. The proof failed and the entry was corrected.
 
@@ -117,9 +125,20 @@ promotes a checkout copy into the registry, `reset_demo_repositories` deletes th
 `ConnectorImporter#connector_source_location` dereferences the dead path. Nine examples fail.
 
 Retraction: the first fix put the path into the cache key. It removed the nine failures but
-broke two specs that guard cross-path sharing as a designed feature. The correct fix is in the
-consumer: check the path exists, fall back to the canonical copy under `lib/connectors`.
-Validated: 85/85 on the guard and degrade specs, then 4481 examples, 0 failures on seed 22.
+broke two specs that guard cross-path sharing as a designed feature. The second fix sat in the
+consumer: `ConnectorImporter#connector_source_location` checks that the path exists and falls back
+to the copy under `lib/connectors`. It was validated (85/85 on the guard and degrade specs, then
+4481 examples, 0 failures on seed 22) and withdrawn on 2026-09-07.
+
+Why withdrawn: the diagnosis ran against `5a9614b2`. `origin/main` had already fixed the flake at
+the isolation layer in `ffa78c4a`: `spec/unit/support/default_connector_state_isolation.rb`,
+wrapped around every example by `rails_helper.rb:39-44`, evicts every cache entry whose source
+file vanished and reinstates the uuid registries. On that base the fallback is redundant for the
+flake, it breaks `default_connector_state_isolation_spec.rb:99`, which asserts the raw dead path
+on purpose, and it carries a risk of its own: a lib copy with the same basename is not proven to
+have the same content, so the fallback could copy a different connector silently where the current
+code raises. The patch stays local in `hooks/` for the record. Lesson: diagnose on the merge-base
+the fix will land on, and look upstream for the same fix before writing one.
 
 A blanket `connector_cache.clear` per example also removes the nine failures but breaks
 `solution_loader_degrade_spec.rb:237`, a timing spec that only holds with a warm cache.
@@ -150,3 +169,12 @@ references (code first, then string literals, symbols, specs) and the dynamic-di
 into Claude's context before the next edit. The earlier debate rejected per-edit *blocking*
 because half-finished renames are normal; per-edit *visibility* has no such cost, and it is
 what the user asked for. Serena stays the tool for exact call sites; the protocol names both.
+
+## 15. The red run reverts spec infrastructure
+
+`split_patch` keeps only the example files (`*_spec.rb`, `*.test.*`, `__tests__/`) in the red
+run. `spec_helper.rb`, `rails_helper.rb`, `spec/support/**` and factories are reverted with the
+code, because a hook or a helper is often the change under proof. Finding 1 is exactly that: two
+lines in `spec_helper.rb`. Under the old rule, which treated everything under `spec/` as a spec
+hunk, that proof returned `not_applicable`. Enforcement is unchanged: spec infrastructure owes no
+`Proof-Id` on its own (`is_code_path`), and it stays out of the reference scan.

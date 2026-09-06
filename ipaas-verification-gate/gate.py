@@ -215,14 +215,15 @@ def worst_status(statuses):
     return ranked[-1] if ranked else STATUS_ERROR
 
 
-def is_spec_path(path):
+def is_example_path(path):
+    """The example files themselves. Spec infrastructure (spec_helper, support, factories) is
+    reverted with the code in the red run, because a hook or helper is often the change under proof."""
     name = Path(path).name
-    return (
-        bool(re.search(r"(^|/)spec/", path))
-        or name.endswith("_spec.rb")
-        or ".test." in name
-        or "/__tests__/" in f"/{path}"
-    )
+    return name.endswith("_spec.rb") or ".test." in name or "/__tests__/" in f"/{path}"
+
+
+def is_spec_path(path):
+    return bool(re.search(r"(^|/)spec/", path)) or is_example_path(path)
 
 
 def is_code_path(path):
@@ -275,7 +276,7 @@ def split_patch(patch):
         header = re.match(r"diff --git a/(.+?) b/(.+)\n", block)
         path = header.group(2) if header else ""
         paths.append(path)
-        (spec_blocks if is_spec_path(path) else code_blocks).append(block)
+        (spec_blocks if is_example_path(path) else code_blocks).append(block)
     return "".join(spec_blocks), "".join(code_blocks), paths
 
 

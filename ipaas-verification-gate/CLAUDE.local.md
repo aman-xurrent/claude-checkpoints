@@ -1,6 +1,7 @@
 # Verification gate (local, not committed)
 
-Every change to non-spec code in this repository must be proven before it is reported.
+Every change to non-spec code in this repository must be proven before it is reported. Spec
+helpers and support files count as code for the proof: the red run reverts them too.
 
 1. Write `.claude/proof/declaration.json` in the worktree you are editing:
    `{"proofs":[{"spec_file":"platform/spec/unit/foo_spec.rb","example":"exact example description"}]}`
