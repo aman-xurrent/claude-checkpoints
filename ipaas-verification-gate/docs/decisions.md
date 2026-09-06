@@ -129,3 +129,13 @@ A blanket `connector_cache.clear` per example also removes the nine failures but
 The four ipaas-side files that came out of Phase D (two RSpec `-r` fixes, the diagnostic
 trace hook, the `connector_importer` patch) are changes to ipaas, not gate code. They stay in
 `~/personal/scripts/gate/hooks/` until applied to ipaas.
+
+## 13. Portability
+
+The repository carries the gate and nothing of the project under test: no database dumps,
+no fixtures, no git-server contents, no env files, no keys. `install.sh` recreates the
+infrastructure empty and is idempotent. The two paths the gate needs are environment
+variables (`IPAAS_GATE_REPOSITORY`, `IPAAS_GATE_WORKTREE`); every other ipaas assumption sits
+in the `PROJECT CONFIGURATION` block at the top of `gate.py`, in four named functions, and in
+steps 2 to 4 of the installer, so adapting the gate to another repository is an edit to those
+places and to the ast-grep rules for the language in question. The README lists each one.

@@ -1,2 +1,4 @@
 #!/bin/sh
-exec python3 "$HOME/personal/scripts/gate/gate.py" pre-push "$@"
+# Resolves its own location so the gate can live anywhere; symlinked into .git/hooks by install.sh.
+GATE_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec python3 "$GATE_DIR/gate.py" pre-push "$@"

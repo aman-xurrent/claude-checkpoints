@@ -32,21 +32,68 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# =============================================================================
+# PROJECT CONFIGURATION. Every constant in this block encodes an ipaas assumption.
+# Adapting the gate to another repository means changing this block, the four
+# functions named in the comments, and install.sh. Nothing below the next banner
+# knows about ipaas.
+# =============================================================================
 HOME = Path.home()
-MAIN_REPOSITORY = HOME / "work/ipaas"
-GATE_WORKTREE = HOME / "work/ipaas_worktrees/gate"
-GATE_LOCK_FILE = GATE_WORKTREE.parent / ".gate.lock"
+
+# The repository under test and the disposable worktree the prover works in.
+# Environment variables win over the defaults.
+MAIN_REPOSITORY = Path(os.environ.get("IPAAS_GATE_REPOSITORY", HOME / "work/ipaas")).expanduser()
+GATE_WORKTREE = Path(os.environ.get("IPAAS_GATE_WORKTREE", HOME / "work/ipaas_worktrees/gate")).expanduser()
+
+# Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
+RUBY_PROJECTS = ("platform", "connector", "connector-sdk")
+
+# Shared services the specs touch. Each needs a gate-specific instance, or a proof
+# corrupts the developer's own runs. install.sh creates them; gate_test_environment()
+# refuses to run unless the gate worktree's env file names exactly these.
 GATE_DATABASE = "ipaas_gate_test"
 GATE_QUEUE_DATABASE = "ipaas_queue_gate_test"
 GATE_REDIS_CONTAINER = "ipaas-gate-redis"
 GATE_REDIS_URL = "redis://127.0.0.1:26380/1"
-GATE_GIT_NAMESPACE = "worktree_gate/%{prefix}/%{solution_repo_name}"  # same shape setup-worktree writes
 GATE_GIT_CONTAINER = "ipaas-gate-git"
 GATE_GIT_PORT = "23232"  # soft-serve keeps state in SQLite, which refuses concurrent writers
-SHARED_LINK_TARGETS = ("platform/node_modules", "git-server/ssh-user")
+GATE_GIT_NAMESPACE = "worktree_gate/%{prefix}/%{solution_repo_name}"  # same shape setup-worktree writes
+
+# Where the test environment lives, which local files are shared into the gate worktree,
+# and which environment variables prover_environment() overrides (see that function).
 TEST_ENVIRONMENT_FILE = Path("platform/.env.test.local")
 SHARED_ENVIRONMENT_FILE_NAMES = (".env.local", ".env")
-RUBY_PROJECTS = ("platform", "connector", "connector-sdk")
+SHARED_LINK_TARGETS = ("platform/node_modules", "git-server/ssh-user")
+
+# Per-reset generation and per-run database preparation live in
+# generate_frontend_routes() and prepare_pristine_databases().
+
+# Spec layout and what counts as code that owes a proof.
+SYSTEM_SPEC_MARKER = "/spec/system/"
+CODE_EXTENSIONS = {".rb", ".rake", ".erb", ".ru", ".ts", ".tsx", ".js", ".jsx"}
+REFERENCE_GLOBS = ("*.rb", "*.rake", "*.erb", "*.ru", "*.ts", "*.tsx", "*.js", "*.jsx", "*.yml", "*.yaml")
+REFERENCE_EXCLUDES = ("!.claude/**", "!**/node_modules/**", "!**/coverage/**", "!**/log/**", "!**/tmp/**", "!**/db/schema.rb", "!**/vendor/**")
+SCAN_EXCLUDES = ("!**/spec/**", "!**/node_modules/**", "!**/.claude/**", "!**/tmp/**", "!**/vendor/**")
+NOISE_PATH_MARKERS = ("/locales/", "/db/schema.rb", "/db/migrate/")
+
+# Which branch the reference gate diffs against, which commits are Claude's, and the
+# date before which Claude commits are exempt from the proof requirement.
+UPSTREAM_BRANCH = "origin/main"
+CLAUDE_TRAILER_PATTERN = re.compile(r"^Co-Authored-By: Claude", re.MULTILINE)
+GATE_EPOCH = "2026-09-06T00:00:00+00:00"
+
+# Toolchain locations and budgets.
+RBENV_SHIMS = HOME / ".rbenv/shims"
+HOMEBREW_BIN = Path("/opt/homebrew/bin")
+RSPEC_TIMEOUT_SECONDS = 900
+FULL_SUITE_TIMEOUT_SECONDS = 3600  # spec/unit takes 17 to 28 minutes in the gate
+FLAKE_SEEDS = (11, 22, 33)
+RANDOMIZED_SUITE_SEED = 11
+
+# =============================================================================
+# GATE INTERNALS. Project-independent.
+# =============================================================================
+GATE_LOCK_FILE = GATE_WORKTREE.parent / ".gate.lock"
 
 PROOF_DIRECTORY = Path(".claude/proof")
 DECLARATION_FILE_NAME = "declaration.json"
@@ -56,37 +103,22 @@ PATCH_FILE_NAME = "patch.diff"
 META_FILE_NAME = "meta.json"
 FINDINGS_FILE_NAME = "findings.json"
 LOG_FILE_NAME = "prover.log"
-
-FLAKE_SEEDS = (11, 22, 33)
-RSPEC_TIMEOUT_SECONDS = 900
-FULL_SUITE_TIMEOUT_SECONDS = 3600  # spec/unit takes 24 to 28 minutes in the gate
-SYSTEM_SPEC_MARKER = "/spec/system/"
-CODE_EXTENSIONS = {".rb", ".rake", ".erb", ".ru", ".ts", ".tsx", ".js", ".jsx"}
-RBENV_SHIMS = HOME / ".rbenv/shims"
-HOMEBREW_BIN = Path("/opt/homebrew/bin")
-
-CLAUDE_TRAILER_PATTERN = re.compile(r"^Co-Authored-By: Claude", re.MULTILINE)
 REFERENCES_DIRECTORY_NAME = "references"
+
 UNPROVABLE_RULES = Path(__file__).resolve().parent / "unprovable.yml"
 UNPROVABLE_FIXTURE = Path(__file__).resolve().parent / "unprovable_fixture.rb"
 UNPROVABLE_FIXTURE_EXPECTED_MATCHES = 9
-REFERENCE_GLOBS = ("*.rb", "*.rake", "*.erb", "*.ru", "*.ts", "*.tsx", "*.js", "*.jsx", "*.yml", "*.yaml")
-REFERENCE_EXCLUDES = ("!.claude/**", "!**/node_modules/**", "!**/coverage/**", "!**/log/**", "!**/tmp/**", "!**/db/schema.rb", "!**/vendor/**")
-SCAN_EXCLUDES = ("!**/spec/**", "!**/node_modules/**", "!**/.claude/**", "!**/tmp/**", "!**/vendor/**")
 DEFINITION_KINDS = {"class", "module", "method", "singletonMethod", "constant", "accessor", "alias",
                     "function", "interface", "type", "enum", "variable"}
-NOISE_PATH_MARKERS = ("/locales/", "/db/schema.rb", "/db/migrate/")
 UNSCOPED_ONLY_KINDS = {"variable", "constant"}
 MAX_REMOVED_NAMES = 40
 MAX_HITS_PER_NAME = 80
-UPSTREAM_BRANCH = "origin/main"
+
 VERDICT_UNUSED = "Unused"
 VERDICT_ENUMERATED = "Enumerated"
 VERDICT_USED = "Used"
 REFERENCES_VERDICT_TRAILER = "References-Verdict"
 UNPROVABLE_TRAILER = "Unprovable-References"
-RANDOMIZED_SUITE_SEED = 11
-GATE_EPOCH = "2026-09-06T00:00:00+00:00"  # commits authored before the gate existed are exempt
 PROOF_ID_TRAILER = "Proof-Id"
 PROOF_STATUS_TRAILER = "Proof-Status"
 PROOF_FRESH_TRAILER = "Proof-Fresh"
@@ -691,12 +723,11 @@ def ensure_shared_links():
 
 
 def ensure_gate_redis():
-    ensure_container(GATE_REDIS_CONTAINER, f"docker run -d --name {GATE_REDIS_CONTAINER} --restart unless-stopped -p 26380:6379 valkey/valkey:8-alpine")
+    ensure_container(GATE_REDIS_CONTAINER, "run install.sh, which creates it")
 
 
 def ensure_gate_git():
-    ensure_container(GATE_GIT_CONTAINER, "see ci/git-server-create.sh: soft-serve from ipaas-git-test:latest on port "
-                     f"{GATE_GIT_PORT} with SOFT_SERVE_INITIAL_ADMIN_KEYS, then ci/git-server-configure.sh")
+    ensure_container(GATE_GIT_CONTAINER, "run install.sh, which builds the image and creates it")
 
 
 def ensure_container(name, how_to_start):
