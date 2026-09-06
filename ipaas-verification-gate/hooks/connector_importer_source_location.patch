@@ -1,0 +1,23 @@
+diff --git a/platform/app/services/connector_importer.rb b/platform/app/services/connector_importer.rb
+index 48f9c609..a23e3a58 100644
+--- a/platform/app/services/connector_importer.rb
++++ b/platform/app/services/connector_importer.rb
+@@ -109,8 +109,17 @@ class ConnectorImporter
+   def connector_source_location(source_connector)
+     proc = source_connector.triggers.first&.instance_variable_get(:@parse)
+     proc ||= source_connector.actions.first&.instance_variable_get(:@run)
+-    proc&.source_location&.first or
++    path = proc&.source_location&.first or
+       raise IPaaS::Error, "Cannot determine source file for connector #{source_connector.uuid}: " \
+                           'no triggers or actions'
++    return path if File.exist?(path)
++
++    canonical_connector_source(File.basename(path, '.rb')) or
++      raise IPaaS::Error, "Source file for connector #{source_connector.uuid} no longer exists: #{path}"
++  end
++
++  def canonical_connector_source(name)
++    ConnectorLoader.connector_rb_paths_under(Rails.root.join('lib/connectors'))
++                   .find { |candidate| File.basename(candidate, '.rb') == name }
+   end
+ end

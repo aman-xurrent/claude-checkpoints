@@ -1,0 +1,30 @@
+id: dispatch-unprovable
+language: Ruby
+message: dynamic dispatch whose target is not a literal; reference completeness cannot be proven here
+rule:
+  any:
+    # A. dispatch by name where the first argument is not a literal symbol or plain string
+    - all:
+        - kind: call
+        - has: {field: method, regex: '^(send|public_send|__send__|try|define_method|define_singleton_method|const_get|const_set|class_eval|module_eval|instance_eval|class_exec|instance_exec|eval)$'}
+        - has: {field: arguments, has: {nthChild: 1}}
+        - not:
+            has:
+              field: arguments
+              has:
+                nthChild: 1
+                any:
+                  - kind: simple_symbol
+                  - all: [{kind: delimited_symbol}, {not: {has: {kind: interpolation, stopBy: end}}}]
+                  - all: [{kind: string}, {not: {has: {kind: interpolation, stopBy: end}}}]
+    # B. constant resolved from a receiver that is not a plain string
+    - all:
+        - kind: call
+        - has: {field: method, regex: '^(constantize|safe_constantize|classify)$'}
+        - not:
+            has:
+              field: receiver
+              all: [{kind: string}, {not: {has: {kind: interpolation, stopBy: end}}}]
+    # C. open dispatch surface
+    - all: [{kind: method}, {has: {field: name, regex: '^(method_missing|respond_to_missing\?)$'}}]
+    - all: [{kind: singleton_method}, {has: {field: name, regex: '^(method_missing|respond_to_missing\?)$'}}]
