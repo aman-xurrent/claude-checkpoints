@@ -112,7 +112,7 @@ Applied 2026-09-07 in the worktree `~/work/ipaas_worktrees/spec-cache-leaks` (br
 `worktree/spec-cache-leaks`, base `origin/main` 05688096), written and not committed. The
 regression example in `encryptor_provider_spec.rb` ('starts every example with empty key caches')
 encrypts in a `before(:context)` inside a transaction it rolls back, so both caches hold keys whose
-rows are gone, then round-trips in the example. Proof `20260906T195500Z-49743da06747`: red fails
+rows are gone, then round-trips in the example. Proof `20260906T200221Z-ed91c1a796ef`: red fails
 with `Key permanently revoked`, green passes, seeds 11/22/33 green. The connector gem's own
 `spec/spec_helper.rb:21-22` already clears both caches per example; the platform helper now matches.
 
