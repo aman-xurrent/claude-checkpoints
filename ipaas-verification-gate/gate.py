@@ -297,8 +297,12 @@ def declaration_written(tool_input):
 
 def launch():
     payload = read_json_stdin()
-    declaration_path = declaration_written(payload.get("tool_input") or {})
+    tool_input = payload.get("tool_input") or {}
+    declaration_path = declaration_written(tool_input)
     if declaration_path is None:
+        context = impact_context(payload.get("tool_name", ""), tool_input)
+        if context:
+            emit_context(context)
         return
     root = repository_root(declaration_path.parent)
     if root is None:
@@ -345,6 +349,93 @@ def read_json_stdin():
 
 def emit_context(text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}))
+
+
+
+
+# ---------------------------------------------------------------- impact
+# Runs on every Edit and Write. When an edit removes or renames a definition, Claude
+# sees every remaining reference and the dynamic-dispatch count right away, instead of
+# discovering them at Stop or, worse, never.
+
+IMPACT_MAX_NAMES = 5
+IMPACT_MAX_HITS = 6
+IMPACT_CATEGORY_ORDER = ("code", "string_literal", "symbol", "spec")  # production call sites first
+
+
+def impact_context(tool_name, tool_input):
+    file_path = tool_input.get("file_path")
+    if not file_path or tool_name not in ("Edit", "Write", "MultiEdit"):
+        return None
+    path = Path(file_path)
+    root = repository_root(path.parent)
+    if root is None or not (root / "platform").is_dir():
+        return None
+    relative = str(path.relative_to(root)) if path.is_relative_to(root) else None
+    if relative is None or not is_code_path(relative):
+        return None
+    removed = removed_by_edit(tool_name, tool_input, root, relative, path)
+    if not removed:
+        return None
+    return impact_report(root, relative, removed)
+
+
+def removed_by_edit(tool_name, tool_input, root, relative, path):
+    suffix = path.suffix
+    if tool_name == "Write":
+        before = base_definitions(root, "HEAD", relative)
+        after = definitions_in(path, relative) if path.exists() else []
+        return definition_names(before) - definition_names(after)
+    edits = tool_input.get("edits") or [tool_input]
+    removed = set()
+    for edit in edits:
+        old_text, new_text = edit.get("old_string") or "", edit.get("new_string") or ""
+        removed |= definition_names(snippet_definitions(old_text, suffix, relative)) - definition_names(snippet_definitions(new_text, suffix, relative))
+    return removed
+
+
+def definition_names(definitions):
+    return {each["name"] for each in definitions}
+
+
+def snippet_definitions(text, suffix, display_path):
+    if not text.strip():
+        return []
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as handle:
+        handle.write(text)
+        temporary = handle.name
+    try:
+        return definitions_in(temporary, display_path)
+    finally:
+        os.unlink(temporary)
+
+
+def impact_report(root, relative, removed):
+    names = sorted(removed)[:IMPACT_MAX_NAMES]
+    project = project_of(relative)
+    lines = [f"gate impact: this edit removed or renamed {len(removed)} definition(s) in {relative}."]
+    for name in names:
+        hits = search_references(root, name)
+        remaining = sorted((hit for hit in hits if hit["category"] not in ("comment", "definition")),
+                           key=lambda hit: IMPACT_CATEGORY_ORDER.index(hit["category"]) if hit["category"] in IMPACT_CATEGORY_ORDER else len(IMPACT_CATEGORY_ORDER))
+        files = len({hit["path"] for hit in remaining})
+        lines.append(f"  {name}: {len(remaining)} remaining reference(s) in {files} file(s)")
+        for hit in remaining[:IMPACT_MAX_HITS]:
+            lines.append(f"    {hit['path'].lstrip('./')}:{hit['line']} [{hit['category']}] {hit['text'][:80]}")
+        if len(remaining) > IMPACT_MAX_HITS:
+            lines.append(f"    ... {len(remaining) - IMPACT_MAX_HITS} more; run gate.py references --name {name}")
+    if len(removed) > IMPACT_MAX_NAMES:
+        lines.append(f"  ... {len(removed) - IMPACT_MAX_NAMES} more removed definitions")
+    try:
+        sites = dynamic_dispatch_sites(root, [project] if project else list(RUBY_PROJECTS))
+        if sites:
+            lines.append(f"  completeness cannot be proven: {len(sites)} dynamic dispatch site(s) in {project or 'the repo'}")
+    except Exception as error:  # the impact report must never hide a broken detector
+        lines.append(f"  dynamic dispatch scan failed: {error}")
+    lines.append("  every one of these is part of this change. For exact call sites use serena find_referencing_symbols; "
+                 "for the full textual list, mocks and strings included, run gate.py references --name <symbol>.")
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------- prove

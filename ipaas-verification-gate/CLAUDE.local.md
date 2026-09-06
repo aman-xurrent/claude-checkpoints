@@ -27,3 +27,21 @@ Every change to non-spec code in this repository must be proven before it is rep
   cannot be proven complete. Say that in your final message, never claim completeness.
 - When you write a PR description, include the output of `gate.py pr-section` verbatim under a
   "Verification" heading. Do not paraphrase it.
+
+## Impact analysis (mandatory, not optional)
+
+Raw grep is not an impact analysis. Before you rename, move, or delete a symbol, and before
+you claim a change is complete, use the tools that see the whole change:
+
+- `python3 ~/personal/scripts/gate/gate.py references --name <symbol>` from the repo root:
+  every textual reference across all three Ruby projects and the TypeScript, classified as
+  code, spec, symbol (mocks such as `receive(:name)`), string literal, comment, or definition,
+  plus the dynamic dispatch sites that make the list unprovable.
+- Serena `find_referencing_symbols` (MCP tool, `activate_project` first): the exact call sites
+  with their enclosing method, which text search cannot distinguish from mocks.
+- Every Edit or Write that removes or renames a definition injects a `gate impact:` block into
+  your context with the remaining references and the dynamic dispatch count. Act on it before
+  the next edit. Do not treat it as noise.
+
+A change is the definition and all of its references. Specs that mock the old name are part
+of the change. String literals and YAML that name it are part of the change.

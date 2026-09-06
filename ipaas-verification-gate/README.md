@@ -37,6 +37,15 @@ The dynamic-dispatch detector is `unprovable.yml`, a set of ast-grep rules for R
 `unprovable_fixture.rb` pins nine expected matches; the gate refuses to report a clean
 verdict if the rules stop matching the fixture.
 
+**Impact at edit time.** The same `PostToolUse` hook that launches the prover also compares
+the definitions in an edit's old and new text with `ctags` (for a Write, the committed file
+against the new one). When a definition disappears, Claude's context receives a `gate impact:`
+block right away: every remaining reference, production call sites first, then string
+literals, then spec mocks, then the dynamic-dispatch count that makes the list unprovable,
+with pointers to Serena for exact call sites and to `gate.py references` for the full list.
+Ordinary edits produce nothing. `CLAUDE.local.md` makes impact analysis mandatory: raw grep is
+not an impact analysis, and a change is the definition plus all of its references.
+
 **Enforcement.** The Stop hook is advisory: it reports and never blocks a turn. The hard
 gate is `pre-push`: it refuses a push whose range contains a Claude-authored commit (one
 carrying `Co-Authored-By: Claude`) that touches code and lacks a fresh, passing `Proof-Id`

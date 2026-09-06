@@ -139,3 +139,14 @@ variables (`IPAAS_GATE_REPOSITORY`, `IPAAS_GATE_WORKTREE`); every other ipaas as
 in the `PROJECT CONFIGURATION` block at the top of `gate.py`, in four named functions, and in
 steps 2 to 4 of the installer, so adapting the gate to another repository is an edit to those
 places and to the ast-grep rules for the language in question. The README lists each one.
+
+## 14. Impact must be visible at the edit, not only at Stop
+
+User request: Claude should use a robust tool for a change's impact, not raw grep, and
+everything related to a change should be visible to it. The Stop-time reference gate already
+reports removed definitions; it now also runs per edit. `PostToolUse` compares the definitions
+in the old and new text with ctags and, on a removal or rename, injects the remaining
+references (code first, then string literals, symbols, specs) and the dynamic-dispatch count
+into Claude's context before the next edit. The earlier debate rejected per-edit *blocking*
+because half-finished renames are normal; per-edit *visibility* has no such cost, and it is
+what the user asked for. Serena stays the tool for exact call sites; the protocol names both.
