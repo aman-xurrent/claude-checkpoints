@@ -199,3 +199,14 @@ the current `Phase: N` trailer, so an earlier, approved phase never fails a late
 specs and references stay branch-wide. And a phase session must run in a worktree with a slot: phases 5 to 7
 need a database and the local instance, and a worktree without `.claude/settings.local.json` fires no hooks,
 so the ceremony copies that file from the main clone at phase start.
+
+Amendment 2026-09-07, from the user: not a throwaway worktree per run and not a slot-less PR worktree.
+One permanently slotted checks worktree (`~/work/ipaas_worktrees/checks`, `gate.py setup-checks`) serves
+finalize's rubocop, yarn and specs, phase 5's exploration and phase 7's live check. It takes the branch
+state (`checks apply`: HEAD plus working tree, routes regenerated, databases prepared when migrations
+changed), and returns to a clean `origin/main` after every use (`checks reset`; finalize resets on its own
+in a `finally`). A branch that holds it blocks another branch until reset. The test database is reloaded
+on reset when migrations were applied; the development database is rebuilt only with `--rebuild-dev-db`,
+because that reseeds the demo data. The slot-less Rails boot that borrowed the main clone's env files was
+removed. Verified: finalize through the checks worktree in 15 seconds, apply, refusal of a second branch,
+reset to a clean `origin/main`.

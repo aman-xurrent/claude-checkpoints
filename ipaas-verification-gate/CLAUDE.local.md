@@ -57,6 +57,9 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
 - `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`.
   Phases 6 and 7 need a passing, fresh proof like any other Claude commit.
 - `.claude/bin/agent_task_finalize --phase N` must exit 0 before a handoff: the shape of the diff for the
-  phase (locations, stubs, TODO markers), rubocop, yarn check and lint, and for phases 6 and 7 the specs
-  and the proof, then the reference verdict.
+  phase (locations, stubs, TODO markers), then rubocop, yarn check and lint and, for phases 6 and 7, the
+  specs, all run in the checks worktree `~/work/ipaas_worktrees/checks` (one permanent slot, reset to
+  `origin/main` after every use), then the proof and the reference verdict.
+- Live checks (phases 5 and 7) use the same worktree: `gate.py checks apply`, `bin/dev` on its slot,
+  `gate.py checks reset`. The PR worktree itself needs no slot.
 - Never start the next phase on your own. The approval of the phase commit starts it.

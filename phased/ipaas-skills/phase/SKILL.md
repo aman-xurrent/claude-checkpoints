@@ -24,8 +24,9 @@ and the handoff. The handoff and the phase start are the same for every phase: `
 
 1. **Resolve the record.** `$ARGUMENTS` is a number: run `/work-on request <id>` (branch `requests/<id>-*`,
    assignment, In Progress). `$ARGUMENTS` is requirement text: run `/create-request` first, then `/work-on`
-   with the new id. Never work on `main`. Work in a worktree with a slot (`/setup-worktree`): phases 5 to 7
-   run specs and the local instance, and `yarn check` needs the generated routes a booted Rails writes.
+   with the new id. Never work on `main`. The PR worktree needs no slot: rubocop, yarn, specs and the live
+   checks run in the checks worktree (`~/work/ipaas_worktrees/checks`, one permanent slot, created once with
+   `python3 ~/personal/scripts/gate/gate.py setup-checks`), which returns to `origin/main` after every use.
 2. **Register phase 1.** In the worktree root: `mkdir -p .claude/proof && printf 1 > .claude/proof/phase`.
    The gate reads this file: the prompt hook reminds you which phase is active, `prepare-commit-msg` stamps
    `Phase: 1`, and `pre-push` knows phases 1 to 5 carry no proof.
@@ -37,6 +38,10 @@ and the handoff. The handoff and the phase start are the same for every phase: `
 - One commit per phase, subject `Request#<id> Phase N: <what>`. A phase with no changeset commits empty.
 - Never start phase N+1 on your own. The approval of the phase N commit starts it.
 - `.claude/bin/agent_task_finalize --phase N` must exit 0 before a handoff. It checks the shape of the diff
-  for the phase, rubocop, yarn, and for phases 6 and 7 the specs and the revert proof.
+  for the phase, then applies the branch state to the checks worktree, runs rubocop, yarn, and for phases 6
+  and 7 the specs there, resets that worktree to `origin/main`, and reads the revert proof and the references.
+- A live check (phases 5 and 7) uses the same worktree: `gate.py checks apply` puts the branch state there,
+  `bin/dev` runs on its slot, `gate.py checks reset` cleans it. Never edit the PR worktree while it holds a
+  live check of another branch; `checks status` tells who holds it.
 - Impact before edits: `python3 ~/personal/scripts/gate/gate.py references --name <symbol>` and Serena
   `find_referencing_symbols` for every symbol you rename, move, or delete. Raw grep is not an impact analysis.

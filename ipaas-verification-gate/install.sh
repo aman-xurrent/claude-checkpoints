@@ -124,6 +124,9 @@ PY
 say "9. gate.py setup (worktree, env, databases)"
 python3 "$GATE_DIR/gate.py" setup
 
+say "9b. checks worktree: one slot for finalize, specs and the live checks (minutes, creates databases)"
+python3 "$GATE_DIR/gate.py" setup-checks
+
 say "10. smoke test (read-only)"
 (cd "$REPO" && python3 "$GATE_DIR/gate.py" references --name RateLimiter | head -3)
 echo

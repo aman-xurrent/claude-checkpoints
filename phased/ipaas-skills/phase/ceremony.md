@@ -18,8 +18,9 @@ branch name `requests/<id>-*`, `<n>` the PR number.
 
 ## Handoff
 
-1. `.claude/bin/agent_task_finalize --phase N` must exit 0. Fix what it reports and rerun. Never hand off on a
-   failure, never skip a check.
+1. `.claude/bin/agent_task_finalize --phase N` must exit 0. It runs rubocop, yarn and specs in the checks
+   worktree and resets it; release any live check (`gate.py checks reset`) first. Fix what it reports and
+   rerun. Never hand off on a failure, never skip a check.
 2. Commit with `/commit`. Subject: `Request#<id> Phase N: <what>`. One commit per phase. A phase without a
    changeset: `git commit --allow-empty -m "Request#<id> Phase N: <what>"` (the co-author trailer is added by
    the hook, the `Phase: N` trailer by `prepare-commit-msg`). When finalize made you fix something after the

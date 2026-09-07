@@ -18,9 +18,12 @@ Start with the phase start in `.claude/skills/phase/ceremony.md` (N = 7).
    match their names. Run the spec-reviewer agent over them before the commit.
 4. Declare the gate proof: `.claude/proof/declaration.json` names the spec example that proves the feature;
    it must fail with the code hunks reverted and pass with them. Read the findings before claiming done.
-5. Verify live: the local instance in the browser with the Chrome MCP, `rails runner` for backend paths,
-   `odiff` against the design where a design was provided. Screenshots go on a `review-assets/<n>-<slug>`
-   orphan branch, never on the PR branch, and are linked from the PR description.
+5. Verify live in the checks worktree: from the PR worktree `python3 ~/personal/scripts/gate/gate.py checks apply`,
+   then `cd ~/work/ipaas_worktrees/checks && source .claude/worktree.env && cd platform && bin/dev` and open
+   `http://127.0.0.1:$WEB_PORT` with the Chrome MCP; `rails runner` there for backend paths; `odiff` against
+   the design where one was provided. Stop `bin/dev` and run `gate.py checks reset` before finalize.
+   Screenshots go on a `review-assets/<n>-<slug>` orphan branch, never on the PR branch, and are linked
+   from the PR description.
 6. Keep the phase 6 assertions true: they still describe the illegal states of the implementation.
 7. No new phase 2 to 4 contract change beyond what the phase 5 audit accepted. One that turns out to be
    needed is a finding for the PR description, then made here.

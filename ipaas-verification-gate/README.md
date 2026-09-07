@@ -26,8 +26,12 @@ reported as `vacuous`. A unit-tier proof takes about 30 seconds.
 `.claude/bin/agent_task_finalize`) checks the shape of the current phase's own diff (allowed locations for
 phases 2 to 4, `raise NotImplementedError` bodies for new methods in phase 3, comment-only TODO markers in
 phase 4, no marker removed in phase 6, no marker or stub left in phase 7), runs rubocop on the changed Ruby,
-`yarn check` and `yarn lint` when JavaScript changed (generating the routes first when the worktree has none),
-and for phases 6 and 7 the specs of the changed files and the revert proof, then the reference verdict.
+`yarn check` and `yarn lint` when JavaScript changed, and for phases 6 and 7 the specs of the changed files,
+all inside the **checks worktree** (`gate.py setup-checks` creates it once: one permanent `setup-worktree`
+slot with its own databases, Redis DBs and ports at `~/work/ipaas_worktrees/checks`). Finalize applies the
+branch's HEAD plus its working tree there, runs the tools, and resets it to `origin/main`, test database
+reloaded when the branch carried migrations. `gate.py checks apply | reset | status` gives phases 5 and 7 the
+same worktree for a live check with `bin/dev` and the Chrome MCP. Then the revert proof and the reference verdict.
 Exit 0 pass, 1 a gate failed, 2 wrong shape. The active phase is the number in `.claude/proof/phase`;
 `prepare-commit-msg` stamps it as a `Phase: N` trailer and `pre-push` exempts phases 1 to 5 from the proof.
 
