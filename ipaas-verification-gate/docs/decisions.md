@@ -178,3 +178,24 @@ code, because a hook or a helper is often the change under proof. Finding 1 is e
 lines in `spec_helper.rb`. Under the old rule, which treated everything under `spec/` as a spec
 hunk, that proof returned `not_applicable`. Enforcement is unchanged: spec infrastructure owes no
 `Proof-Id` on its own (`is_code_path`), and it stays out of the reference scan.
+
+## 16. Phased development, step A
+
+Built 2026-09-07 in the ipaas worktree `~/work/ipaas_worktrees/phase-loop` (branch `worktree/phase-loop`,
+written and not committed) and in `gate.py`: the kickoff skill `/phase`, the shared `ceremony.md`, the
+skills `/phase-1` to `/phase-7`, the wrapper `.claude/bin/agent_task_finalize`, the `finalize` subcommand,
+the `Phase: N` trailer, the pre-push exemption, and the protocol line the prompt hook prints. Copies of the
+ipaas files sit under `phased/ipaas-skills/` so another machine can install them.
+
+Verified by hand in that worktree: the prompt hook prints the default-workflow line, stays silent on `quick`,
+and names the active phase; a phase 2 commit gets `Phase: 2` and passes pre-push without a proof; a phase 7
+Claude commit without a proof is refused; the phase 2 check rejects a file outside its locations; the phase
+3 check rejects a method body that is not the stub; the phase 4 check rejects a code line and a four-line
+reason; `finalize --phase 2` passes end to end in a worktree without a slot (routes generated under
+`RAILS_ENV=test` with the main clone's env files).
+
+Two rulings made while building. Shape checks compare against the newest branch commit that does not carry
+the current `Phase: N` trailer, so an earlier, approved phase never fails a later phase's check. Lint, yarn,
+specs and references stay branch-wide. And a phase session must run in a worktree with a slot: phases 5 to 7
+need a database and the local instance, and a worktree without `.claude/settings.local.json` fires no hooks,
+so the ceremony copies that file from the main clone at phase start.

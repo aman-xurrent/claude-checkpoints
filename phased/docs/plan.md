@@ -1,6 +1,6 @@
 # ipaas phase loop: 7-phase development as the default Claude Code workflow
 
-Status: planned 2026-09-07 after orientation, eight user answers, and four blind debates. Nothing built yet.
+Status: planned 2026-09-07 after orientation, eight user answers, and four blind debates. Step A built the same day (see `ipaas-verification-gate/docs/decisions.md` section 16); steps B to D not started.
 Source of the phases: `~/personal/prime-agent/phases/001-007.md` (the Cursor pipeline that read them is retired).
 Home of the daemon and templates: `~/personal/claude-checkpoints` (github.com/aman-xurrent/claude-checkpoints).
 Home of the ipaas skills: `~/work/ipaas/.claude/skills/` (committed, team-visible).

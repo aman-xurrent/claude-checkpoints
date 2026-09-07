@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Phase-aware finish check for phased development. Runs the verification gate's
+# finalize subcommand: the shape of the diff for the phase, rubocop, yarn check
+# and lint, specs and the revert proof (phases 6 and 7), and the reference verdict.
+#
+# Usage: .claude/bin/agent_task_finalize [--phase N]
+# Exit codes: 0 pass, 1 a gate failed, 2 the diff has the wrong shape for the
+# phase, 3 the gate is not installed on this machine.
+#
+# The gate lives outside the repository. Install it from
+# https://github.com/aman-xurrent/claude-checkpoints (ipaas-verification-gate/install.sh)
+# or point IPAAS_GATE_PY at its gate.py.
+set -euo pipefail
+
+GATE_PY="${IPAAS_GATE_PY:-$HOME/personal/scripts/gate/gate.py}"
+
+if [[ ! -f "$GATE_PY" ]]; then
+  echo "agent_task_finalize: gate.py not found at $GATE_PY. Install the verification gate or set IPAAS_GATE_PY." >&2
+  exit 3
+fi
+
+exec python3 "$GATE_PY" finalize "$@"

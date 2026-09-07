@@ -46,3 +46,17 @@ you claim a change is complete, use the tools that see the whole change:
 
 A change is the definition and all of its references. Specs that mock the old name are part
 of the change. String literals and YAML that name it are part of the change.
+
+## Phased development (default for every code change)
+
+A code change starts with `/phase` (phase 1, discovery) unless the prompt says `quick`. One branch, one
+draft PR, one commit per phase, a human approval between phases. The phase skills live in
+`.claude/skills/phase-1` to `phase-7`; the shared start and handoff are in `.claude/skills/phase/ceremony.md`.
+
+- The active phase is the number in `.claude/proof/phase`. `prepare-commit-msg` stamps it as `Phase: N`.
+- `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`.
+  Phases 6 and 7 need a passing, fresh proof like any other Claude commit.
+- `.claude/bin/agent_task_finalize --phase N` must exit 0 before a handoff: the shape of the diff for the
+  phase (locations, stubs, TODO markers), rubocop, yarn check and lint, and for phases 6 and 7 the specs
+  and the proof, then the reference verdict.
+- Never start the next phase on your own. The approval of the phase commit starts it.
