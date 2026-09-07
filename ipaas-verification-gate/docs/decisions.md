@@ -243,3 +243,30 @@ a real approval typing into a live window; the first phased request will show th
 
 Operating rule, learned twice now: never `rsync --delete` from the live gate directory into
 `ipaas-verification-gate/`; the repository directory holds `docs/` that the live directory does not.
+
+## 19. The model cannot skip the gate
+
+The user saw a session push with `GATE_SKIP=1` and ruled: no skipping by the model; a skip is the user's act.
+Three layers, all outside the model's reach in an ipaas session:
+
+1. The gate honours no environment variable any more. Anything a process can set, the model can set. The
+   only override is a one-shot token, `gate.py skip-once "<reason>"`, written from the user's own shell
+   (`!` prefix, or a terminal), valid for one refused push within 15 minutes, recorded in
+   `~/.local/state/gate/skips.log` with the reason and the violations it waved through.
+2. Deny rules in every worktree's `.claude/settings.local.json`, merged by `link-worktree` and so present in
+   every new worktree: `--no-verify` on push and commit, `git commit -n`, `core.hooksPath`, `skip-once`,
+   `phased pause|resume`, `launchctl`, and Edit, Write and MultiEdit on the gate directory, the daemon
+   directory, `.claude/proof/runs/**`, `.claude/proof/references/**`, the settings file itself, the token and
+   the skips log. Deny rules beat allow rules in every mode, auto included, and a deny in the project scope
+   beats an allow in the user scope.
+3. The `guard` PreToolUse hook, registered by the same step for Bash, Edit, Write, MultiEdit and
+   NotebookEdit. It reads the whole Bash command and denies it when a forbidden token appears anywhere
+   (`--no-verify`, `hooksPath`, `.git/hooks`, `skip-once`, `.gate-skip-once`, `GATE_SKIP`, `send-pack`,
+   `GIT_DIR=`, `settings.local.json`, `launchctl`), when `git commit -n` or a hooks config change is in it,
+   or when a write-shaped command targets the protected paths. Gate invocations the protocol asks for
+   (`references`, `checks`, `finalize`, `pr-section`, `link-worktree`, the wrapper, `phased handoff|status|
+   logs|adopt`, `printf N > .claude/proof/phase`, reading a findings file) pass. Hook denies hold in every mode.
+
+Verified: `GATE_SKIP=1` push refused; token push allowed once, the next refused; the guard denied nine
+bypass shapes and allowed seven legitimate commands; every worktree carries 31 deny rules and the hook,
+and a fresh `git worktree add` inherits them. What remains reachable is what the user does by hand.

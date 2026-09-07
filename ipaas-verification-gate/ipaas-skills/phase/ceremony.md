@@ -42,5 +42,7 @@ branch name `requests/<id>-*`, `<n>` the PR number.
    `.claude/bin/xurrent-api /me`.
 6. One internal note: `.claude/bin/xurrent-api POST "/requests/<id>/notes" '{"text": "Phase N: <pr url> (Created|Updated)"}'`.
 7. `command -v phased >/dev/null && phased handoff --pr <n> --phase N`. Without the daemon this line does nothing.
-8. Stop. Your last message: `Phase N handed off: <pr url>. Waiting for the approval of <short sha>.`
-   Do not start the next phase. The approval starts it.
+8. Stop. Your last message: `Phase N handed off: <pr url>. Waiting for an Approved comment on <short sha>.`
+   Do not start the next phase. The approval starts it: GitHub refuses a review approval from the author
+   of a pull request, so the approver posts a conversation comment whose first line is `Approved`, newer
+   than the handoff and than the last commit. The daemon reads it once and starts phase N+1.

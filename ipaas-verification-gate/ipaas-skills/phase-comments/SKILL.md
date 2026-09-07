@@ -28,4 +28,4 @@ The daemon's brief lists the threads. `N` is the current phase (`.claude/proof/p
    `Request#<id> Phase N: address review comments`. Push with `--force-with-lease` after an amend.
 5. `phased handoff --pr <n> --phase N`, then the Xurrent PATCH and the internal note from
    `.claude/skills/phase/ceremony.md` (member = me, Review column, `Phase N: <pr url> (Updated)`).
-6. Stop. `Phase N updated after review: <pr url>. Waiting for the approval of <short sha>.`
+6. Stop. `Phase N updated after review: <pr url>. Waiting for an Approved comment on <short sha>.`

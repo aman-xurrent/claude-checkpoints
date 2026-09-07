@@ -24,7 +24,7 @@ Source is `user` (your answer) or `adjudicated` (blind debate, my ruling with th
 
 | # | Decision | Source |
 |---|----------|--------|
-| 1 | Event loop advanced by your GitHub approval on the latest commit, zero unresolved threads; comments addressed first. | user |
+| 1 | Event loop advanced by your approval on the latest commit, zero unresolved threads; comments addressed first. AMENDED 2026-09-07: GitHub refuses a review approval from the PR author, so the approval is your conversation comment whose first line is `Approved`, newer than the handoff and than the last commit, consumed once. A real APPROVED review by you also counts. | user |
 | 2 | Every ipaas code task starts at phase 1; opt out per task with the word `quick`. | user |
 | 3 | Commits carry a `Phase: N` trailer. Pre-push lets phases 2, 3, 4, 5 through with the reference gate only. Phases 6 and 7 need a passing proof. Correction to the option you chose: phase 5's only commit is the phase 2 to 4 gaps it found (structures, stubs, TODOs), so it has nothing provable; phase 6 adds assertions, which a spec can trip, so it does. | user, adjusted |
 | 4 | AMENDED 2026-09-07 by the user: nothing is committed to ipaas. The phase skills and `agent_task_finalize` live in `~/personal/scripts/gate/ipaas-skills/` and are symlinked into every worktree by `gate.py link-worktree`, which a local `post-checkout` git hook runs for each new worktree (it also copies `CLAUDE.local.md` and `.claude/settings.local.json` and adds the exclude entries). Original: committed in ipaas under `.claude/`. | user |
@@ -120,6 +120,8 @@ D. Hardening: collision test with a live `@claude` run on the same PR, `adopt` a
   without branch protection reviews, so it is never used; only the author-filtered review counts. Outdated but
   unresolved threads exist on real PRs (13 on 1010): the rule counts a thread as blocking only when
   `isResolved` is false and `isOutdated` is false, matching the repo's own review-thread query.
+- The model cannot skip the gate: no environment override, user-only one-shot token, deny rules and the
+  `guard` PreToolUse hook in every worktree (decisions section 19).
 - Unattended phases need permission-free commit and push: `.claude/settings.local.json` in the PR worktree must
   carry the same allow rules as the main clone (`setup-worktree` copies `settings.json`, not `settings.local.json`).
 - A phase that spans hours may compact the session; the brief must be enough to resume from disk.

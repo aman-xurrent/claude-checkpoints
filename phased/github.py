@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 
-from decide import Facts, Review, Thread
+from decide import Comment, Facts, Review, Thread
 
 PULL_REQUEST_FIELDS = """
   number url title isDraft closed merged headRefName
@@ -12,6 +12,7 @@ PULL_REQUEST_FIELDS = """
   latestReviews(first:20){ nodes{ id author{login} state submittedAt commit{ oid } } }
   reviewThreads(first:100){ nodes{ id isResolved isOutdated
     comments(last:20){ nodes{ author{login} body path line createdAt url } } } }
+  comments(last:30){ nodes{ id author{login} body createdAt } }
 """
 
 
@@ -52,7 +53,9 @@ def facts_from(raw):
         last = comments[-1] if comments else {"createdAt": "1970-01-01T00:00:00Z", "author": {"login": ""}}
         threads.append(Thread(node["id"], node["isResolved"], node["isOutdated"], last["createdAt"],
                               (last.get("author") or {}).get("login", "")))
-    return Facts(commit["oid"], commit["committedDate"], raw["isDraft"], raw["closed"], raw["merged"], reviews, tuple(threads))
+    comments = tuple(Comment(node["id"], (node.get("author") or {}).get("login", ""), node.get("body", ""), node["createdAt"])
+                     for node in raw["comments"]["nodes"])
+    return Facts(commit["oid"], commit["committedDate"], raw["isDraft"], raw["closed"], raw["merged"], reviews, tuple(threads), comments)
 
 
 def set_label(gh_host, repo, number, label):

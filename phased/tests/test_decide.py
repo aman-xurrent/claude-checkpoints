@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from decide import AddressComments, Facts, MarkDone, Review, StartPhase, Thread, decide  # noqa: E402
+from decide import AddressComments, Comment, Facts, MarkDone, Review, StartPhase, Thread, decide, is_approval_text  # noqa: E402
 
 ME = "aman-kumar"
 HEAD = "a" * 40
@@ -18,8 +18,12 @@ def approval(commit=HEAD, at="2026-09-07T11:00:00Z", author=ME, review_id="R1", 
     return Review(review_id, author, review_state, at, commit)
 
 
-def facts(reviews=(), threads=(), merged=False, closed=False):
-    return Facts(HEAD, "2026-09-07T09:00:00Z", True, closed, merged, tuple(reviews), tuple(threads))
+def facts(reviews=(), threads=(), merged=False, closed=False, comments=(), head_at="2026-09-07T09:00:00Z"):
+    return Facts(HEAD, head_at, True, closed, merged, tuple(reviews), tuple(threads), tuple(comments))
+
+
+def comment(body="Approved.", at="2026-09-07T11:00:00Z", author=ME, comment_id="C1"):
+    return Comment(comment_id, author, body, at)
 
 
 def thread(resolved=False, outdated=False, at="2026-09-07T10:30:00Z", author="tushar", thread_id="T1"):
@@ -64,6 +68,33 @@ class DecideTest(unittest.TestCase):
 
     def test_done_stays_done(self):
         self.assertIsNone(decide(state(status="done"), facts([approval()]), ME))
+
+    def test_approved_comment_by_me_after_handoff_and_head_starts_the_next_phase(self):
+        self.assertEqual(decide(state(), facts(comments=[comment()]), ME), StartPhase(3, "C1"))
+
+    def test_approved_comment_older_than_the_last_commit_does_nothing(self):
+        self.assertIsNone(decide(state(), facts(comments=[comment(at="2026-09-07T10:30:00Z")], head_at="2026-09-07T10:45:00Z"), ME))
+
+    def test_approved_comment_before_the_handoff_does_nothing(self):
+        self.assertIsNone(decide(state(), facts(comments=[comment(at="2026-09-07T09:30:00Z")]), ME))
+
+    def test_consumed_approved_comment_does_nothing(self):
+        self.assertIsNone(decide(state(consumed=["C1"]), facts(comments=[comment()]), ME))
+
+    def test_teammate_approved_comment_does_nothing(self):
+        self.assertIsNone(decide(state(), facts(comments=[comment(author="tushar")]), ME))
+
+    def test_only_the_word_approved_counts(self):
+        self.assertTrue(is_approval_text("Approved."))
+        self.assertTrue(is_approval_text("  approved!\nsecond line with a note"))
+        self.assertTrue(is_approval_text("APPROVED"))
+        self.assertFalse(is_approval_text("Approved, but rename the field first"))
+        self.assertFalse(is_approval_text("LGTM"))
+        self.assertFalse(is_approval_text("not approved"))
+        self.assertFalse(is_approval_text(""))
+
+    def test_approved_comment_on_phase_seven_finishes(self):
+        self.assertEqual(decide(state(phase=7), facts(comments=[comment()]), ME), MarkDone("phase 7 approved by aman-kumar"))
 
     def test_merged_or_closed_finishes(self):
         self.assertEqual(decide(state(), facts(merged=True), ME), MarkDone("pull request merged"))

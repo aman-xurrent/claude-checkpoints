@@ -9,7 +9,12 @@ Subcommands
   stop        Stop hook. Advisory summary of the declaration and the findings.
   surface     UserPromptSubmit hook. Prints findings that were not shown yet.
   commit-msg  prepare-commit-msg git hook. Stamps proof trailers on the commit.
-  pre-push    pre-push git hook. Refuses Claude commits that lack a passing proof.
+  pre-push    pre-push git hook. Refuses Claude commits that lack a passing proof. No environment
+              override; the only skip is the one-shot token from skip-once.
+  skip-once "<reason>"  User-only: allow the next refused push once (15 minutes). Logged.
+  guard       PreToolUse hook. Denies a Bash command or an edit that would skip or weaken the
+              gate: --no-verify, hooksPath, skip-once, writes to the gate, the daemon, the proof
+              results or the settings file. Registered in every worktree by link-worktree.
               Commits of phases 1 to 5 (Phase: N trailer) need no proof.
   finalize    Phase-aware finish check: shape of the diff for the phase, then rubocop,
               yarn check and lint, specs (phases 6 and 7) in the checks worktree, the
@@ -191,7 +196,26 @@ UNPROVABLE_TRAILER = "Unprovable-References"
 PROOF_ID_TRAILER = "Proof-Id"
 PROOF_STATUS_TRAILER = "Proof-Status"
 PROOF_FRESH_TRAILER = "Proof-Fresh"
-SKIP_ENVIRONMENT_VARIABLE = "GATE_SKIP"
+# The only way past a refused push: a one-shot token the user writes with `gate.py skip-once "<reason>"`
+# from their own shell (`!` prefix in the prompt, or a terminal). Claude's Bash tool is denied that command.
+# No environment variable is honoured: anything a process can set, the model can set.
+SKIP_TOKEN_FILE = GATE_WORKTREE.parent / ".gate-skip-once"
+SKIP_TOKEN_MAX_AGE_SECONDS = 15 * 60
+SKIPS_LOG = HOME / ".local/state/gate/skips.log"
+
+# The fence around the gate, applied to Claude's tools in every ipaas worktree by link_worktree():
+# permission deny rules for what the rule syntax can express, and the guard hook for the rest.
+PHASED_DIRECTORY = Path(__file__).resolve().parent.parent / "phased"
+GUARD_WRITE_TOKENS = (">", "sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "truncate", "python3 -", "cat <<", "ln -", "install ")
+GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP", "send-pack",
+                            "GIT_DIR=", "phased pause", "phased resume", "settings.local.json", "launchctl")
+GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", "personal/scripts/gate", "personal/scripts/phased",
+                         ".local/state/gate", ".local/state/phased")
+GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
+                          ".claude/bin/agent_task_finalize", "phased handoff", "phased status", "phased logs", "phased adopt")
+GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
+                                  "randomized-suite", "surface", "stop", "launch")
+GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
 
 STATUS_PENDING = "pending"
@@ -853,11 +877,42 @@ def pre_push():
     print("gate: refusing the push.", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
-    if os.environ.get(SKIP_ENVIRONMENT_VARIABLE):
-        print(f"gate: {SKIP_ENVIRONMENT_VARIABLE} is set, pushing anyway.", file=sys.stderr)
+    token = consume_skip_token()
+    if token:
+        record_skip(token, violations)
+        print(f"gate: one-shot skip token used ({token['reason']}); pushing this once.", file=sys.stderr)
         return
-    print(f"gate: set {SKIP_ENVIRONMENT_VARIABLE}=1 to override on purpose.", file=sys.stderr)
+    print("gate: only the user can skip, from their own shell: "
+          f"`! python3 {Path(__file__).resolve()} skip-once \"<reason>\"` then push again within 15 minutes.", file=sys.stderr)
     sys.exit(1)
+
+
+def consume_skip_token():
+    if not SKIP_TOKEN_FILE.exists():
+        return None
+    token = read_json(SKIP_TOKEN_FILE) or {}
+    SKIP_TOKEN_FILE.unlink(missing_ok=True)
+    written = token.get("at", "1970-01-01T00:00:00+00:00")
+    if (datetime.now(timezone.utc) - datetime.fromisoformat(written)).total_seconds() > SKIP_TOKEN_MAX_AGE_SECONDS:
+        print("gate: the skip token is older than 15 minutes and was discarded.", file=sys.stderr)
+        return None
+    return token
+
+
+def record_skip(token, violations):
+    SKIPS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(SKIPS_LOG, "a") as handle:
+        handle.write(json.dumps({"at": now_iso(), "reason": token.get("reason"), "cwd": os.getcwd(), "violations": violations}) + "\n")
+
+
+def skip_once(arguments):
+    """Written by the user, never by the model. One push, within 15 minutes, with a reason on record."""
+    reason = " ".join(arguments).strip()
+    if not reason:
+        print("usage: gate.py skip-once \"<why this push may bypass the gate>\"")
+        sys.exit(2)
+    write_json(SKIP_TOKEN_FILE, {"reason": reason, "at": now_iso()})
+    print(f"gate: the next refused push within 15 minutes goes through once. Reason on record: {reason}")
 
 
 def commit_violations(root, sha):
@@ -1258,6 +1313,96 @@ def tool_checks_in_checks_worktree(root, paths, run_specs):
     return checks
 
 
+# ------------------------------------------------------------------ guard
+
+def guard():
+    """PreToolUse hook. Prints a deny decision when a tool call would skip or weaken the gate; silent otherwise.
+    Deny rules cover the prefix-shaped commands; this covers substrings and paths anywhere in the command."""
+    payload = read_json_stdin()
+    tool_name = payload.get("tool_name", "")
+    tool_input = payload.get("tool_input") or {}
+    reason = None
+    if tool_name == "Bash":
+        reason = guard_bash(tool_input.get("command") or "")
+    elif tool_name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        reason = guard_path(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+    if reason:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                                 "permissionDecisionReason": f"gate guard: {reason}"}}))
+
+
+def guard_bash(command):
+    for token in GUARD_FORBIDDEN_ANYWHERE:
+        if token in command:
+            return f"`{token}` skips or changes the gate. Only the user can do that, from their own shell (`!` prefix)."
+    if re.search(r"\bgit\s+commit\b.*\s-n\b", command):
+        return "`git commit -n` skips the commit hooks that stamp the proof and phase trailers."
+    if re.search(r"\bgit\s+config\b.*\bhooks", command):
+        return "changing the hooks configuration disables the gate."
+    for path in GUARD_WRITE_PROTECTED:
+        if path in command and not guard_allowed_invocation(command) and any(token in command for token in GUARD_WRITE_TOKENS):
+            return f"writing under `{path}` would forge or weaken the gate. Read it if you need to; never write it."
+    return None
+
+
+def guard_allowed_invocation(command):
+    """`python3 .../gate.py <read-only or check subcommand> ...` and the wrapper and daemon commands the protocol asks for."""
+    stripped = command.strip()
+    for prefix in GUARD_ALLOWED_PREFIXES:
+        if stripped.startswith(prefix):
+            rest = stripped[len(prefix):].strip()
+            if prefix.endswith("gate.py "):
+                return rest.split(" ", 1)[0] in GUARD_ALLOWED_GATE_SUBCOMMANDS and not any(token in rest for token in GUARD_WRITE_TOKENS)
+            return not any(token in rest for token in GUARD_WRITE_TOKENS)
+    return False
+
+
+def guard_path(file_path):
+    expanded = str(Path(file_path).expanduser())
+    for path in GUARD_WRITE_PROTECTED:
+        if path in expanded:
+            return f"`{expanded}` is part of the gate; the model never writes it."
+    if expanded.endswith("settings.local.json") or expanded.endswith(".gate-skip-once"):
+        return f"`{expanded}` holds the fence around the gate; the model never writes it."
+    return None
+
+
+def fence_deny_rules():
+    gate = str(Path(__file__).resolve().parent)
+    # An absolute path rule is written `//Users/...`: one extra slash in front of the absolute path.
+    protected = [f"/{gate}/**", f"/{PHASED_DIRECTORY}/**", "**/.claude/proof/runs/**", "**/.claude/proof/references/**",
+                 "**/.claude/settings.local.json", f"/{SKIP_TOKEN_FILE}", f"/{SKIPS_LOG.parent}/**"]
+    rules = ["Bash(git push --no-verify*)", "Bash(git push * --no-verify*)", "Bash(git commit --no-verify*)", "Bash(git commit -n*)",
+             "Bash(git -c core.hooksPath*)", "Bash(git config * core.hooksPath*)", "Bash(* skip-once*)", "Bash(phased pause*)",
+             "Bash(phased resume*)", "Bash(launchctl *)"]
+    for pattern in protected:
+        rules += [f"Edit({pattern})", f"Write({pattern})", f"MultiEdit({pattern})"]
+    return rules
+
+
+def ensure_fence(root):
+    """Deny rules and the guard hook in the worktree's .claude/settings.local.json, merged, idempotent."""
+    settings_path = root / LOCAL_SETTINGS_FILE
+    settings = read_json(settings_path, default={}) or {}
+    permissions = settings.setdefault("permissions", {})
+    deny = permissions.setdefault("deny", [])
+    stale = [rule for rule in deny if "(///" in rule]
+    for rule in stale:
+        deny.remove(rule)
+    added = [rule for rule in fence_deny_rules() if rule not in deny]
+    deny.extend(added)
+    hooks = settings.setdefault("hooks", {})
+    pre = hooks.setdefault("PreToolUse", [])
+    command = f"python3 {Path(__file__).resolve()} guard"
+    present = any(hook.get("command") == command for entry in pre for hook in entry.get("hooks", []))
+    if not present:
+        pre.append({"matcher": GUARD_HOOK_MATCHER, "hooks": [{"type": "command", "command": command}]})
+    if added or stale or not present:
+        write_json(settings_path, settings)
+        return [f"fenced {settings_path}: {len(added)} deny rule(s) added, {len(stale)} stale removed" + ("" if present else ", guard hook registered")]
+    return []
+
+
 # ------------------------------------------------------- local worktree links
 
 def link_worktree(root, quiet=False):
@@ -1275,6 +1420,7 @@ def link_worktree(root, quiet=False):
         actions += ensure_symlink(binaries / name, LOCAL_SKILLS_DIRECTORY / name)
     actions += ensure_copy(root / LOCAL_PROTOCOL_FILE.name, LOCAL_PROTOCOL_FILE)
     actions += ensure_copy(root / LOCAL_SETTINGS_FILE, MAIN_REPOSITORY / LOCAL_SETTINGS_FILE)
+    actions += ensure_fence(root)
     actions += ensure_exclude_entries(root)
     if not quiet:
         print("\n".join(actions) if actions else f"{root}: already linked")
@@ -1921,6 +2067,8 @@ def main(argv):
         "surface": lambda: surface(),
         "commit-msg": lambda: commit_msg(arguments),
         "pre-push": lambda: pre_push(),
+        "skip-once": lambda: skip_once(arguments),
+        "guard": lambda: guard(),
         "finalize": lambda: finalize(arguments),
         "setup-checks": lambda: setup_checks(),
         "checks": lambda: checks(arguments),

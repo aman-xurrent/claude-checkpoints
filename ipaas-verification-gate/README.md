@@ -71,7 +71,14 @@ not an impact analysis, and a change is the definition plus all of its reference
 gate is `pre-push`: it refuses a push whose range contains a Claude-authored commit (one
 carrying `Co-Authored-By: Claude`) that touches code and lacks a fresh, passing `Proof-Id`
 trailer. `prepare-commit-msg` stamps the trailers. Human commits are ignored. Commits
-authored before the gate epoch are exempt. `GATE_SKIP=1 git push` overrides on purpose.
+authored before the gate epoch are exempt. There is no environment override. The only way past a refused
+push is a one-shot token the user writes from their own shell, `gate.py skip-once "<reason>"` (the `!`
+prefix in the prompt runs outside Claude's tools), good for one push within 15 minutes and logged to
+`~/.local/state/gate/skips.log`. Claude's own tools cannot get there: `link-worktree` writes deny rules
+into every worktree's `.claude/settings.local.json` (`--no-verify`, `core.hooksPath`, `skip-once`, edits to
+the gate, the daemon, the proof results and the settings file) and registers the `guard` PreToolUse hook,
+which reads every Bash command and denies the same things wherever they appear in it. Deny rules and hook
+decisions hold in every permission mode, auto included.
 
 ## Files
 

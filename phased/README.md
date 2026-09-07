@@ -8,10 +8,11 @@ mirrored here. Plan and decisions: `docs/plan.md`, `../ipaas-verification-gate/d
 
 1. Reads every registered pull request of a repository in one GraphQL call: head commit, latest review
    per author with state, time and the commit it was given on, review threads with resolved and outdated
-   flags and their last comments.
-2. `decide.py` turns the local state and those facts into one action. Your `APPROVED` review on the current
-   head, dated after the last handoff and not consumed, with no unresolved current thread, starts the next
-   phase. A blocking thread with a comment newer than the handoff sends the session back to address it.
+   flags and their last comments, and the last thirty conversation comments.
+2. `decide.py` turns the local state and those facts into one action. Your conversation comment whose first
+   line is `Approved` (GitHub refuses a review approval from the PR author; a real `APPROVED` review by you
+   counts too), newer than the last handoff and than the last commit, not consumed, with no unresolved
+   current thread, starts the next phase. `Approved, but rename X` is feedback, not a release. A blocking thread with a comment newer than the handoff sends the session back to address it.
    Phase 7 approved, or a merged or closed PR, ends the loop.
 3. The action is typed as one line into the Claude window named `pr<number>` in the repository's tmux
    session when a Claude process is alive there; otherwise a new window starts `claude` with the brief.

@@ -6,7 +6,9 @@ argument-hint: "<request id | requirement>"
 allowed-tools: Bash, Read, Glob, Grep, Edit, Write, Agent
 ---
 
-Phased development: one branch, one draft PR, one commit per phase, a human approval between phases.
+Phased development: one branch, one draft PR, one commit per phase, a human approval between phases. The
+approval is a conversation comment on the PR whose first line is `Approved`, by the approver, after the
+phase's last commit (GitHub refuses a review approval from the PR author).
 The phases are `/phase-1` to `/phase-7`. Each phase skill names what it may change, its done criteria,
 and the handoff. The handoff and the phase start are the same for every phase: `.claude/skills/phase/ceremony.md`.
 

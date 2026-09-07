@@ -2,8 +2,9 @@
 """phased: the phase loop daemon for phased development.
 
 A pull request under the loop is registered by the phase 1 handoff. Every poll, one GraphQL call per
-repository reads the registered pull requests. The user's APPROVED review on the current head, given after
-the last handoff and with no unresolved current review thread, starts the next phase in the Claude tmux
+repository reads the registered pull requests. The user's comment `Approved` (or an APPROVED review) newer
+than the last handoff and than the last commit, with no unresolved current review thread, starts the next
+phase in the Claude tmux
 window of that pull request (reused when alive, else a new window). New review comments send the session
 back to address them first. The local state file is the truth; GitHub is the event feed.
 
@@ -315,7 +316,7 @@ def handoff(arguments):
     state_store.save(repo, pr, current, f"handoff phase {phase}")
     if config.get("labels"):
         github.set_label(config["gh_host"], repo, pr, f"phase:{phase}")
-    say(f"{repo} #{pr}: phase {phase} handed off at {head[:10]}; waiting for {config['me']}'s approval on that head"
+    say(f"{repo} #{pr}: phase {phase} handed off at {head[:10]}; waiting for {config['me']}'s comment `Approved` newer than that head"
         + (f" (window {window})" if window else " (not inside tmux: a new window will open for the next phase)"))
 
 

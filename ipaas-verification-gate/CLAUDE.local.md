@@ -15,7 +15,10 @@ helpers and support files count as code for the proof: the red run reverts them 
    uses `~/work/ipaas_worktrees/gate` with its own databases.
 
 `pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer.
-`GATE_SKIP=1` overrides on purpose and is logged. The gate lives in `~/personal/scripts/gate/gate.py`.
+There is no skip for you. No environment variable, no `--no-verify`, no hook path change, no edit to the
+gate: those commands are denied to your Bash tool. Only the user can let one push through, from their own
+shell, with `! python3 ~/personal/scripts/gate/gate.py skip-once "<reason>"`. When the gate refuses, fix
+the cause or report the refusal verbatim. The gate lives in `~/personal/scripts/gate/gate.py`.
 
 ## Reference impact (Phase B)
 
