@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# git post-checkout hook: link the local phase workflow into a new worktree.
+GATE_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec python3 "$GATE_DIR/gate.py" post-checkout "$@"

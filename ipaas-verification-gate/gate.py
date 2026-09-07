@@ -16,6 +16,11 @@ Subcommands
               proof (phases 6 and 7) and the references. Exit 0 pass, 1 a gate failed,
               2 the diff has the wrong shape.
   setup-checks  Create the checks worktree and give it a slot (own databases, ports).
+  link-worktree [path]  Link the local phase skills and agent_task_finalize into a worktree,
+              copy CLAUDE.local.md and .claude/settings.local.json when missing, add the
+              exclude entries. Nothing of this is committed. post-checkout runs it for
+              every new worktree.
+  post-checkout  git hook. Runs link-worktree on a new worktree.
   checks      apply | reset [--rebuild-dev-db] | status. Put the current branch state into
               the checks worktree for a live check, or return it to origin/main.
   references  Reference impact of removed or renamed definitions (or --name X).
@@ -61,6 +66,16 @@ CHECKS_WORKTREE = Path(os.environ.get("IPAAS_CHECKS_WORKTREE", HOME / "work/ipaa
 WORKTREE_SETUP_SCRIPT = Path(".claude/bin/setup-worktree")
 WORKTREE_ENVIRONMENT_FILE = Path(".claude/worktree.env")
 MIGRATIONS_DIRECTORY = "platform/db/migrate/"
+# Local-only workflow files linked into every worktree, never committed: the phase skills and the
+# finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
+LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
+LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7")
+LOCAL_BIN_NAMES = ("agent_task_finalize",)
+LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
+LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
+# No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
+LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/bin/agent_task_finalize",
+                         "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
 RUBY_PROJECTS = ("platform", "connector", "connector-sdk")
@@ -1242,6 +1257,87 @@ def tool_checks_in_checks_worktree(root, paths, run_specs):
     return checks
 
 
+# ------------------------------------------------------- local worktree links
+
+def link_worktree(root, quiet=False):
+    """Make one worktree usable for phased development without committing anything: symlinks to the
+    local skills and the finalize wrapper, copies of the protocol and the hooks file when missing, and
+    exclude entries so git never lists any of it."""
+    actions = []
+    skills = root / ".claude/skills"
+    skills.mkdir(parents=True, exist_ok=True)
+    for name in LOCAL_SKILL_NAMES:
+        actions += ensure_symlink(skills / name, LOCAL_SKILLS_DIRECTORY / name)
+    binaries = root / ".claude/bin"
+    binaries.mkdir(parents=True, exist_ok=True)
+    for name in LOCAL_BIN_NAMES:
+        actions += ensure_symlink(binaries / name, LOCAL_SKILLS_DIRECTORY / name)
+    actions += ensure_copy(root / LOCAL_PROTOCOL_FILE.name, LOCAL_PROTOCOL_FILE)
+    actions += ensure_copy(root / LOCAL_SETTINGS_FILE, MAIN_REPOSITORY / LOCAL_SETTINGS_FILE)
+    actions += ensure_exclude_entries(root)
+    if not quiet:
+        print("\n".join(actions) if actions else f"{root}: already linked")
+    return actions
+
+
+def ensure_symlink(link, target):
+    if link.is_symlink() and link.resolve() == target.resolve():
+        return []
+    if link.exists() and not link.is_symlink():
+        return [f"kept {link}: a real file or directory is there, not replaced"]
+    if link.is_symlink():
+        link.unlink()
+    link.symlink_to(target)
+    return [f"linked {link} -> {target}"]
+
+
+def ensure_copy(destination, source):
+    if destination.exists() or destination.is_symlink() or not source.exists() or source.resolve() == destination.resolve():
+        return []
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return [f"copied {source.name} -> {destination}"]
+
+
+def ensure_exclude_entries(root):
+    common = Path(git(root, "rev-parse", "--git-common-dir").stdout.strip())
+    if not common.is_absolute():
+        common = (root / common).resolve()
+    exclude = common / "info/exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    present = exclude.read_text().splitlines() if exclude.exists() else []
+    missing = [entry for entry in LOCAL_EXCLUDE_ENTRIES if entry not in present]
+    if not missing:
+        return []
+    with open(exclude, "a") as handle:
+        handle.write("".join(f"{entry}\n" for entry in missing))
+    return [f"excluded in {exclude}: {', '.join(missing)}"]
+
+
+def link_worktree_command(arguments):
+    root = repository_root(Path(arguments[0]).expanduser() if arguments else Path(os.getcwd()))
+    if root is None:
+        print("link-worktree: not inside a git repository")
+        sys.exit(2)
+    if root.resolve() in (GATE_WORKTREE.resolve(), CHECKS_WORKTREE.resolve()):
+        print(f"{root}: gate or checks worktree, no Claude session runs here; skipped")
+        return
+    link_worktree(root)
+
+
+def post_checkout(arguments):
+    """git post-checkout: <previous head> <new head> <flag>. flag 1 is a branch checkout, which is also what
+    `git worktree add` performs in the new worktree. The gate and checks worktrees run no Claude session."""
+    if len(arguments) < 3 or arguments[2] != "1":
+        return
+    root = repository_root(Path(os.getcwd()))
+    if root is None or root.resolve() in (GATE_WORKTREE.resolve(), CHECKS_WORKTREE.resolve()):
+        return
+    actions = link_worktree(root, quiet=True)
+    if actions:
+        print(f"gate: linked the phase workflow into {root}", file=sys.stderr)
+
+
 # ------------------------------------------------------- checks worktree
 
 def checks_ready():
@@ -1827,6 +1923,8 @@ def main(argv):
         "finalize": lambda: finalize(arguments),
         "setup-checks": lambda: setup_checks(),
         "checks": lambda: checks(arguments),
+        "link-worktree": lambda: link_worktree_command(arguments),
+        "post-checkout": lambda: post_checkout(arguments),
         "references": lambda: references(arguments),
         "pr-section": lambda: pr_section(),
         "randomized-suite": lambda: randomized_suite(arguments),

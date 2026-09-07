@@ -3,7 +3,7 @@
 Status: planned 2026-09-07 after orientation, eight user answers, and four blind debates. Step A built the same day (see `ipaas-verification-gate/docs/decisions.md` section 16); steps B to D not started.
 Source of the phases: `~/personal/prime-agent/phases/001-007.md` (the Cursor pipeline that read them is retired).
 Home of the daemon and templates: `~/personal/claude-checkpoints` (github.com/aman-xurrent/claude-checkpoints).
-Home of the ipaas skills: `~/work/ipaas/.claude/skills/` (committed, team-visible).
+Home of the ipaas skills: `~/personal/scripts/gate/ipaas-skills/` (local only, linked into every worktree, never committed).
 
 ## 1. What the loop does
 
@@ -27,7 +27,7 @@ Source is `user` (your answer) or `adjudicated` (blind debate, my ruling with th
 | 1 | Event loop advanced by your GitHub approval on the latest commit, zero unresolved threads; comments addressed first. | user |
 | 2 | Every ipaas code task starts at phase 1; opt out per task with the word `quick`. | user |
 | 3 | Commits carry a `Phase: N` trailer. Pre-push lets phases 2, 3, 4, 5 through with the reference gate only. Phases 6 and 7 need a passing proof. Correction to the option you chose: phase 5's only commit is the phase 2 to 4 gaps it found (structures, stubs, TODOs), so it has nothing provable; phase 6 adds assertions, which a spec can trip, so it does. | user, adjusted |
-| 4 | Phase skills and `agent_task_finalize` are committed in ipaas under `.claude/`. | user |
+| 4 | AMENDED 2026-09-07 by the user: nothing is committed to ipaas. The phase skills and `agent_task_finalize` live in `~/personal/scripts/gate/ipaas-skills/` and are symlinked into every worktree by `gate.py link-worktree`, which a local `post-checkout` git hook runs for each new worktree (it also copies `CLAUDE.local.md` and `.claude/settings.local.json` and adds the exclude entries). Original: committed in ipaas under `.claude/`. | user |
 | 5 | A new small daemon in claude-checkpoints runs the loop. | user |
 | 6 | No knowledge files. Your phase reviews and the final code review are the record. Phase 1 notes and the phase 5 audit go into the PR description. | user |
 | 7 | `agent_task_finalize` runs the full gate: rubocop on changed Ruby, `yarn check` and lint on changed JS, specs for changed files, the revert proof for the declared example, the reference verdict, and phase shape checks. Non-zero exit on any failure. | user |

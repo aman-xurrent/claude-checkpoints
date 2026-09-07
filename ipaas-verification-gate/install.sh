@@ -124,6 +124,17 @@ PY
 say "9. gate.py setup (worktree, env, databases)"
 python3 "$GATE_DIR/gate.py" setup
 
+say "9a. local phase workflow: hook symlink, links into the main clone and every existing worktree"
+HOOKS_DIR="$(cd "$REPO" && git rev-parse --git-path hooks)"
+case "$(cd "$REPO" && readlink "$HOOKS_DIR/post-checkout" 2>/dev/null)" in
+  "$GATE_DIR/post-checkout") ;;
+  "") ln -s "$GATE_DIR/post-checkout" "$REPO/$HOOKS_DIR/post-checkout" 2>/dev/null || ln -s "$GATE_DIR/post-checkout" "$HOOKS_DIR/post-checkout"; echo "hook: post-checkout linked" ;;
+  *) echo "WARNING: a foreign post-checkout hook exists at $HOOKS_DIR/post-checkout; add: python3 $GATE_DIR/gate.py post-checkout \"\$@\"" ;;
+esac
+(cd "$REPO" && git worktree list --porcelain | awk '/^worktree /{print $2}') | while IFS= read -r wt; do
+  python3 "$GATE_DIR/gate.py" link-worktree "$wt" | sed "s|^|  |"
+done
+
 say "9b. checks worktree: one slot for finalize, specs and the live checks (minutes, creates databases)"
 python3 "$GATE_DIR/gate.py" setup-checks
 
