@@ -138,6 +138,18 @@ done
 say "9b. checks worktree: one slot for finalize, specs and the live checks (minutes, creates databases)"
 python3 "$GATE_DIR/gate.py" setup-checks
 
+say "9c. phased daemon: config, command, LaunchAgent"
+PHASED_DIR="$(cd "$GATE_DIR/../phased" 2>/dev/null && pwd || true)"
+if [ -n "$PHASED_DIR" ] && [ -f "$PHASED_DIR/phased.py" ]; then
+  GH_HOST="${GH_HOST:-git.4me.com}" python3 "$PHASED_DIR/phased.py" init
+  mkdir -p "$HOME/.local/bin" && ln -sfn "$PHASED_DIR/phased.py" "$HOME/.local/bin/phased"
+  sed -e "s|__PHASED_DIR__|$PHASED_DIR|g" -e "s|__HOME__|$HOME|g" "$PHASED_DIR/launchd/com.aman.phased.plist" > "$HOME/Library/LaunchAgents/com.aman.phased.plist"
+  launchctl bootout "gui/$(id -u)/com.aman.phased" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.aman.phased.plist" && echo "phased: LaunchAgent loaded"
+else
+  echo "phased: directory not found next to the gate ($GATE_DIR/../phased); daemon not installed"
+fi
+
 say "10. smoke test (read-only)"
 (cd "$REPO" && python3 "$GATE_DIR/gate.py" references --name RateLimiter | head -3)
 echo
