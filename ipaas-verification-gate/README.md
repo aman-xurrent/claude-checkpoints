@@ -35,6 +35,13 @@ same worktree for a live check with `bin/dev` and the Chrome MCP. Then the rever
 Exit 0 pass, 1 a gate failed, 2 wrong shape. The active phase is the number in `.claude/proof/phase`;
 `prepare-commit-msg` stamps it as a `Phase: N` trailer and `pre-push` exempts phases 1 to 5 from the proof.
 
+**Local-only phase workflow.** The phase skills (`/phase`, `/phase-1` to `/phase-7`, `/phase-comments`) and
+the `agent_task_finalize` wrapper are never committed to ipaas. They live in `ipaas-skills/` here and are
+symlinked into each worktree by `gate.py link-worktree`; the `post-checkout` hook does that for every new
+worktree and also copies `CLAUDE.local.md` and `.claude/settings.local.json` so hooks fire there. The
+shared `.git/info/exclude` hides all of it from `git status`. The daemon that advances the phases lives in
+`../phased/`.
+
 **Reference gate.** At the end of every turn the gate compares `ctags` output of the base
 version (merge-base with the upstream branch) against the working version and lists every
 removed or renamed definition. For each name it searches the repository with ripgrep,
