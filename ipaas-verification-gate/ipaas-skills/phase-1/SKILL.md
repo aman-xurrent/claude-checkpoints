@@ -26,7 +26,8 @@ Start with the phase start in `.claude/skills/phase/ceremony.md` (N = 1).
    ```
 
    List each comment in the discovery section with what it changes in the plan. A comment you decide not to
-   follow is answered in the PR with the reason, never dropped in silence.
+   follow is answered in the PR with the reason, never dropped in silence. Post that answer with
+   `.claude/bin/pr-comment --pr <n> --title "..." --body-file <path>`, never with `gh pr comment` or the API.
 3. Prior work: `git log --oneline --grep=<key words> origin/main | head`, closed PRs on the topic
    (`GH_HOST=git.4me.com gh pr list --state merged --search "<key words>"`), and the notes on the request.
 4. Similar code: find the closest existing feature and read it whole. Use Serena (`find_symbol`,

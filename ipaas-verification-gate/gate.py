@@ -75,7 +75,7 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize",)
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
@@ -214,7 +214,19 @@ GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once
 GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", "personal/scripts/gate", "personal/scripts/phased",
                          ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
-                          ".claude/bin/agent_task_finalize", "phased handoff", "phased status", "phased logs", "phased adopt")
+                          ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", "phased handoff", "phased status",
+                          "phased logs", "phased adopt")
+# Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
+# folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
+# reader cannot tell it from a comment the account holder typed.
+COMMENT_WRAPPER = ".claude/bin/pr-comment"
+GUARD_COMMENT_POSTING = (
+    re.compile(r"\bgh\s+pr\s+comment\b"),
+    re.compile(r"\bgh\s+pr\s+review\b"),
+    re.compile(r"\bgh\s+pr-review\s+(reply|comment)\b"),
+    re.compile(r"addPullRequestReviewThreadReply|addPullRequestReview\b|addComment\b|addPullRequestReviewComment"),
+    re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
+)
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
                                   "randomized-suite", "surface", "stop", "launch")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
@@ -1357,6 +1369,10 @@ def command_segments(command):
 
 
 def guard_segment(segment):
+    if COMMENT_WRAPPER not in segment and any(pattern.search(segment) for pattern in GUARD_COMMENT_POSTING):
+        return ("a pull request comment must go through `.claude/bin/pr-comment --pr N --title \"...\" --body-file <path>`, "
+                "which stamps who posted it and folds the content into a collapsed block. A raw post is indistinguishable "
+                "from one the account holder wrote.")
     touched = [path for path in GUARD_WRITE_PROTECTED if path in segment]
     if not touched:
         return None

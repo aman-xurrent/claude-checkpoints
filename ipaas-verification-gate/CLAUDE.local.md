@@ -66,3 +66,6 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
 - Live checks (phases 5 and 7) use the same worktree: `gate.py checks apply`, `bin/dev` on its slot,
   `gate.py checks reset`. The PR worktree itself needs no slot.
 - Never start the next phase on your own. The approval of the phase commit starts it.
+- Every pull request comment goes through `.claude/bin/pr-comment --pr N --title "..." --body-file <path>`,
+  which stamps who posted it and folds the body into a collapsed block. `gh pr comment`, `gh pr review` and
+  the comment API are denied, because a raw post is indistinguishable from one the user wrote.

@@ -17,18 +17,21 @@ on the pull request itself. Both are requests from the approver. `N` is the curr
    say so in the answer and leave it for the phase it belongs to. A comment that names a skill (for example
    `/agent-skills:code-simplify` or `/edge-case-hunter`) means run that skill and fold its findings in.
 2. Fix, then verify: `.claude/bin/agent_task_finalize --phase N` must exit 0.
-3. Answer a conversation comment with a conversation comment naming what changed, file and line:
+3. Answer every item. Every comment you post goes through `.claude/bin/pr-comment`, never through
+   `gh pr comment` or the API: the wrapper stamps who posted it (phase, branch, worktree, tmux session) and
+   folds your text into a collapsed block, so a reader can tell it from a comment the account holder typed.
+   The guard refuses the raw calls. Write the answer to a file first, then:
 
    ```bash
-   GH_HOST=git.4me.com gh pr comment <n> --body "<what changed, file and line, one item per comment point>"
+   .claude/bin/pr-comment --pr <n> --title "Phase N: <what you answered>" --body-file /tmp/answer.md
+   .claude/bin/pr-comment --pr <n> --thread <thread id> --title "Fixed" --body-file /tmp/reply.md
    ```
 
-   Reply in each review thread with what changed, then resolve it. Both go through GraphQL on
-   git.4me.com; `gh pr-review` replies are refused there:
+   The title is the one line a reader sees; the body carries what changed, file and line, one item per point.
+   Resolving a thread is not a comment and stays a direct call:
+
    ```bash
-   gh api graphql -f thread=<thread id> -f body="<reply>" -f query='mutation($thread:ID!,$body:String!){
-     addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread, body:$body}){ comment{ url } } }'
-   gh api graphql -f thread=<thread id> -f query='mutation($thread:ID!){
+   GH_HOST=git.4me.com gh api graphql -f thread=<thread id> -f query='mutation($thread:ID!){
      resolveReviewThread(input:{threadId:$thread}){ thread{ isResolved } } }'
    ```
    Do not reply on threads you did not address. Do not resolve a thread you disagree with; answer it and

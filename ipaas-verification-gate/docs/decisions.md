@@ -333,3 +333,21 @@ directory is named `code-simplification`; Claude Code exposes both names, and th
 conversation comment and runs a skill a comment names.
 
 Verified on PR 1027: the daemon typed the feedback into the live window `pr1027` at the next tick.
+
+## 23. A session's pull request comments carry an identity
+
+On PR 1027 the approver's comment and the session's answer looked the same: both say
+"Aman Kumar (aman-kumar) commented", because the session posts with the account's token. The user asked for
+what ghmention does: an identity header, the content collapsed, and no way for the model to post around it.
+
+`.claude/bin/pr-comment` (linked from `ipaas-skills/pr-comment`) takes `--pr`, `--title`, `--body-file` and
+an optional `--thread`, and posts a comment that opens with a header naming the phase and loop status, the
+branch and head, the worktree, the tmux session, the request and the time, followed by the body inside a
+`<details>` block that is collapsed by default. It reads all of that itself from git, tmux and the loop's
+state file, so a caller passes only the content.
+
+The guard denies `gh pr comment`, `gh pr review`, `gh pr-review reply`, the comment mutations
+(`addPullRequestReviewThreadReply`, `addPullRequestReview`, `addComment`) and a POST to
+`issues/<n>/comments` unless the command runs the wrapper. Resolving a thread, editing the pull request
+description, reading comments and `gh pr ready` stay direct: none of them posts a comment. Verified on ten
+command shapes, five denied and five allowed.

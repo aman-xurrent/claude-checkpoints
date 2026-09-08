@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#
+# Post a pull request comment as the phased session, with an identity header and the content folded
+# into a collapsed block.
+#
+# Every comment a session posts on a pull request goes through this script. A comment posted with the
+# raw API carries the account's name and nothing else, so a reader cannot tell an automated comment
+# from one the account holder typed. The guard hook refuses the raw calls.
+#
+# Usage:
+#   .claude/bin/pr-comment --pr N --title "<one line>" --body-file <path> [--thread <node id>]
+#   ... --body-file - reads the body from standard input.
+#
+# Options:
+#   --pr N            pull request number. Read from the current branch's PR when omitted.
+#   --title           the summary line of the collapsed block. Required.
+#   --body-file       markdown to fold into the block, or `-` for standard input. Required.
+#   --thread          reply inside this review thread instead of the conversation.
+#   --dry-run         print what would be posted and exit.
+set -euo pipefail
+
+GH_HOST_DEFAULT=git.4me.com
+STATE_ROOT="${PHASED_STATE_DIR:-$HOME/.local/state/phased}"
+
+pr=""; title=""; body_file=""; thread=""; dry_run=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pr) pr="$2"; shift 2 ;;
+    --title) title="$2"; shift 2 ;;
+    --body-file) body_file="$2"; shift 2 ;;
+    --thread) thread="$2"; shift 2 ;;
+    --dry-run) dry_run=true; shift ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    *) echo "pr-comment: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+
+[ -n "$title" ] || { echo "pr-comment: --title is required" >&2; exit 2; }
+[ -n "$body_file" ] || { echo "pr-comment: --body-file is required (use - for stdin)" >&2; exit 2; }
+
+export GH_HOST="${GH_HOST:-$GH_HOST_DEFAULT}"
+root="$(git rev-parse --show-toplevel)"
+branch="$(git rev-parse --abbrev-ref HEAD)"
+head_sha="$(git rev-parse --short HEAD)"
+remote="$(git remote get-url origin)"; remote="${remote%.git}"
+repo="$(printf '%s' "$remote" | awk -F'[:/]' '{print $(NF-1) "/" $NF}')"
+
+if [ -z "$pr" ]; then
+  pr="$(gh pr list --head "$branch" --json number --jq '.[0].number' 2>/dev/null || true)"
+  [ -n "$pr" ] || { echo "pr-comment: no open pull request for $branch; pass --pr" >&2; exit 2; }
+fi
+
+phase_file="$root/.claude/proof/phase"
+phase="$( [ -f "$phase_file" ] && cat "$phase_file" || echo "-" )"
+request="$(printf '%s' "$branch" | awk -F/ '$1=="requests"||$1=="problems"{split($2,a,"-"); print a[1]}')"
+window="${TMUX_PANE:-}"
+session=""
+if [ -n "$window" ] && command -v tmux >/dev/null 2>&1; then
+  session="$(tmux display-message -p -t "$window" '#{session_name}:#{window_name}' 2>/dev/null || true)"
+fi
+state="$STATE_ROOT/${repo//\//__}/pr-$pr/state.json"
+loop_status="$( [ -f "$state" ] && python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("status","-"))' "$state" 2>/dev/null || echo "-" )"
+
+body="$(mktemp)"; trap 'rm -f "$body"' EXIT
+{
+  printf '🤖 **Claude Code, phased session** · posted with @%s'"'"'s token, not written by them.\n\n' "$(gh api user --jq .login 2>/dev/null || echo aman-kumar)"
+  printf '| | |\n|---|---|\n'
+  printf '| Phase | %s of 7 (%s) |\n' "$phase" "$loop_status"
+  printf '| Branch | `%s` at `%s` |\n' "$branch" "$head_sha"
+  printf '| Worktree | `%s` |\n' "${root/#$HOME/\~}"
+  [ -n "$session" ] && printf '| Session | tmux `%s` |\n' "$session"
+  [ -n "$request" ] && printf '| Request | %s |\n' "$request"
+  printf '| At | %s |\n' "$(date '+%Y-%m-%d %H:%M %Z')"
+  printf '\n<details>\n<summary><b>%s</b> — click to expand</summary>\n\n' "$title"
+  if [ "$body_file" = "-" ]; then cat; else cat "$body_file"; fi
+  printf '\n\n</details>\n'
+} > "$body"
+
+if [ "$dry_run" = true ]; then
+  echo "--- would post to $repo #$pr${thread:+ (thread $thread)}"
+  cat "$body"
+  exit 0
+fi
+
+if [ -n "$thread" ]; then
+  gh api graphql -f thread="$thread" -F body=@"$body" -f query='
+    mutation($thread:ID!,$body:String!){
+      addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$thread, body:$body}){ comment{ url } } }' \
+    --jq '.data.addPullRequestReviewThreadReply.comment.url'
+else
+  gh pr comment "$pr" --body-file "$body"
+fi

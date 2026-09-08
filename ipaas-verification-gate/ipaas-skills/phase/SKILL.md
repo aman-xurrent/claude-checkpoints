@@ -45,5 +45,8 @@ and the handoff. The handoff and the phase start are the same for every phase: `
 - A live check (phases 5 and 7) uses the same worktree: `gate.py checks apply` puts the branch state there,
   `bin/dev` runs on its slot, `gate.py checks reset` cleans it. Never edit the PR worktree while it holds a
   live check of another branch; `checks status` tells who holds it.
+- Every comment you post on the pull request goes through `.claude/bin/pr-comment --pr N --title "..."
+  --body-file <path>`. It stamps the phase, the branch, the worktree and the tmux session above a collapsed
+  block, so a reader can tell an automated comment from one you typed. The raw calls are denied.
 - Impact before edits: `python3 ~/personal/scripts/gate/gate.py references --name <symbol>` and Serena
   `find_referencing_symbols` for every symbol you rename, move, or delete. Raw grep is not an impact analysis.
