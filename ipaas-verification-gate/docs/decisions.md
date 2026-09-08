@@ -270,3 +270,32 @@ Three layers, all outside the model's reach in an ipaas session:
 Verified: `GATE_SKIP=1` push refused; token push allowed once, the next refused; the guard denied nine
 bypass shapes and allowed seven legitimate commands; every worktree carries 31 deny rules and the hook,
 and a fresh `git worktree add` inherits them. What remains reachable is what the user does by hand.
+
+## 20. Four holes an ipaas session found, 2026-09-08
+
+A session working on `requests/82698379` reported that `pr-section` was refused to it and that the
+reference verdict never ran. Both reports were right, and chasing them opened two more.
+
+**The guard judged the whole command line.** `cd <worktree> && python3 .../gate.py pr-section` failed the
+allowed-invocation test, because that test required the gate call to start the line, so the command fell
+through to the write check and was denied. The guard now splits a compound line on `&&`, `||`, `;`, `|`
+and newlines and judges each simple command on its own, ignoring leading environment assignments. A
+redirection into a protected path is denied by target, not by substring. Re-tested: eleven shapes, four
+allowed, seven denied, including every earlier bypass.
+
+**The Claude trailer pattern was case-sensitive.** It matched `Co-Authored-By: Claude`, which the commit
+skill writes, but not `Co-authored-by: Claude`, which is git's own convention and what an Opus session
+wrote. That commit was therefore not a Claude commit to the gate: no Stop warning, no stamped trailers,
+and `pre-push` let it through unproven. It is now `re.IGNORECASE`. Verified on four trailer variants and on
+the real commit, which the gate now sees and, with a real remote sha, refuses for the missing `Proof-Id`.
+
+**A proof measured the uncommitted diff.** Once the work was committed the same change looked empty, so a
+passing proof was reported stale, and a proof declared after committing reverted nothing and came back
+`vacuous`. `snapshot_patch` now measures the branch delta (merge-base with the upstream branch to the
+working tree, committed work included) and `launch` resets the gate worktree to that merge-base. The checks
+worktree keeps the working-tree patch, because it is already checked out at HEAD. Verified: the committed
+change re-proved `pass` with a real red run, and Stop no longer calls it stale.
+
+**Silence read as "did not run".** Stop said nothing when no definition was removed, and `pr-section`
+printed `not computed` when no report existed. Stop now states the outcome either way, and `pr-section`
+computes the report when it is missing or stale rather than reporting its own absence.

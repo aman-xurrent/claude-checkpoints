@@ -150,7 +150,9 @@ FINALIZE_TIMEOUT_SECONDS = 1800
 # Which branch the reference gate diffs against, which commits are Claude's, and the
 # date before which Claude commits are exempt from the proof requirement.
 UPSTREAM_BRANCH = "origin/main"
-CLAUDE_TRAILER_PATTERN = re.compile(r"^Co-Authored-By: Claude", re.MULTILINE)
+# Case-insensitive on purpose: git's own convention is `Co-authored-by:`, the commit skill writes
+# `Co-Authored-By:`, and a case-sensitive pattern let a Claude commit past the gate unseen.
+CLAUDE_TRAILER_PATTERN = re.compile(r"^Co-authored-by:\s*Claude", re.MULTILINE | re.IGNORECASE)
 GATE_EPOCH = "2026-09-06T00:00:00+00:00"
 
 # Toolchain locations and budgets.
@@ -349,8 +351,12 @@ def untracked_paths(root):
     return [path for path in completed.stdout.split("\0") if path and not path.startswith(str(PROOF_DIRECTORY))]
 
 
-def snapshot_patch(root):
-    tracked = git(root, "diff", "HEAD", "--binary", "--no-color", "--no-ext-diff",
+def snapshot_patch(root, base=None):
+    """The change under proof: everything between the merge-base with the upstream branch and the working
+    tree, committed work included. Measuring only the uncommitted diff made the same change look empty once
+    it was committed, which reported a passing proof as stale and a fresh one as vacuous."""
+    reference = base or diff_base(root)
+    tracked = git(root, "diff", reference, "--binary", "--no-color", "--no-ext-diff",
                   "--", ".", f":(exclude){PROOF_DIRECTORY}").stdout
     pieces = [tracked]
     for path in untracked_paths(root):
@@ -406,9 +412,9 @@ def launch():
         emit_context(f"gate: {declaration_path} has no \"proofs\" list; nothing launched.")
         return
 
-    patch = snapshot_patch(root)
+    base_sha = diff_base(root)
+    patch = snapshot_patch(root, base_sha)
     spec_patch, code_patch, paths = split_patch(patch)
-    base_sha = git(root, "rev-parse", "HEAD").stdout.strip()
     run_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{patch_digest(patch)}"
     run_directory = runs_directory(root) / run_id
     run_directory.mkdir(parents=True, exist_ok=True)
@@ -762,8 +768,7 @@ def stop_message(root):
         try:
             report = references_report(root)
             write_references_report(root, report)
-            if report["verdict"] != STATUS_NOT_APPLICABLE:
-                messages.append(summarize_references(report))
+            messages.append(summarize_references(report))
         except Exception as error:  # a broken reference check must be visible, never silent
             messages.append(f"reference check failed: {error}")
     return "\n".join(messages) if messages else None
@@ -1339,21 +1344,42 @@ def guard_bash(command):
         return "`git commit -n` skips the commit hooks that stamp the proof and phase trailers."
     if re.search(r"\bgit\s+config\b.*\bhooks", command):
         return "changing the hooks configuration disables the gate."
-    for path in GUARD_WRITE_PROTECTED:
-        if path in command and not guard_allowed_invocation(command) and any(token in command for token in GUARD_WRITE_TOKENS):
-            return f"writing under `{path}` would forge or weaken the gate. Read it if you need to; never write it."
+    for segment in command_segments(command):
+        reason = guard_segment(segment)
+        if reason:
+            return reason
     return None
 
 
-def guard_allowed_invocation(command):
-    """`python3 .../gate.py <read-only or check subcommand> ...` and the wrapper and daemon commands the protocol asks for."""
-    stripped = command.strip()
+def command_segments(command):
+    """Each simple command of a compound line, judged on its own: `cd x && gate.py pr-section` is two segments."""
+    return [part.strip() for part in re.split(r"&&|\|\||;|\||\n", command) if part.strip()]
+
+
+def guard_segment(segment):
+    touched = [path for path in GUARD_WRITE_PROTECTED if path in segment]
+    if not touched:
+        return None
+    redirect = re.search(r">>?\s*(\S+)", segment)
+    if redirect and any(path in redirect.group(1) for path in GUARD_WRITE_PROTECTED):
+        return f"redirecting into `{redirect.group(1)}` would forge or weaken the gate."
+    if guard_allowed_invocation(segment):
+        return None
+    if any(token in segment for token in GUARD_WRITE_TOKENS):
+        return f"writing under `{touched[0]}` would forge or weaken the gate. Read it if you need to; never write it."
+    return None
+
+
+def guard_allowed_invocation(segment):
+    """`python3 .../gate.py <read-only or check subcommand> ...` and the wrapper and daemon commands the protocol
+    asks for, with leading environment assignments ignored."""
+    stripped = re.sub(r"^(?:\w+=\S*\s+)+", "", segment.strip())
     for prefix in GUARD_ALLOWED_PREFIXES:
         if stripped.startswith(prefix):
             rest = stripped[len(prefix):].strip()
             if prefix.endswith("gate.py "):
-                return rest.split(" ", 1)[0] in GUARD_ALLOWED_GATE_SUBCOMMANDS and not any(token in rest for token in GUARD_WRITE_TOKENS)
-            return not any(token in rest for token in GUARD_WRITE_TOKENS)
+                return rest.split(" ", 1)[0] in GUARD_ALLOWED_GATE_SUBCOMMANDS
+            return True
     return False
 
 
@@ -1543,7 +1569,9 @@ def apply_branch_to_checks(root):
     git(CHECKS_WORKTREE, "checkout", "--detach", "--force", "--quiet", head)
     git(CHECKS_WORKTREE, "reset", "--hard", "--quiet")
     git(CHECKS_WORKTREE, "clean", "-fd", "--quiet")
-    patch = snapshot_patch(root)
+    # HEAD, not the merge-base: the checks worktree is already at this commit, so only the working tree
+    # is missing. A branch-delta patch would apply the committed part a second time.
+    patch = snapshot_patch(root, "HEAD")
     if patch.strip():
         git(CHECKS_WORKTREE, "apply", "--whitespace=nowarn", "-", input_text=patch)
     migrations = migrations_in(root, diff_base(root)) or bool(in_use.get("migrations"))
@@ -1979,7 +2007,7 @@ def pr_section():
     root = repository_root(os.getcwd())
     run_directory = latest_run(root) if root else None
     findings = read_json(run_directory / FINDINGS_FILE_NAME) if run_directory else None
-    report = latest_references_report(root) if root else None
+    report = references_report_for(root)
     lines = ["## Verification", ""]
     if findings:
         lines.append(f"**Revert proof** `{findings.get('id')}`: **{findings.get('status')}**")
@@ -1994,12 +2022,28 @@ def pr_section():
             lines.append(f"- `{symbol['name']}` ({symbol['kind']}): {symbol['verdict']}, {symbol['remaining_count']} remaining reference(s)")
             for hit in symbol["remaining"][:8]:
                 lines.append(f"  - `{hit['path']}:{hit['line']}` [{hit['category']}]")
+        if report["verdict"] == STATUS_NOT_APPLICABLE:
+            lines.append(f"- No definition was removed or renamed against `{report['base'][:10]}`, so no reference could be left behind.")
         if report["dynamic_dispatch_sites"]:
             lines.append(f"- Completeness cannot be proven: {len(report['dynamic_dispatch_sites'])} dynamic dispatch site(s) in {', '.join(report['projects_scanned'])}. "
                          "Ruby resolves `send`, `const_get`, `method_missing` and interpolated names at runtime.")
     else:
-        lines.append("**Reference impact**: not computed.")
+        lines.append("**Reference impact**: could not be computed here (not inside the repository).")
     print("\n".join(lines))
+
+
+def references_report_for(root):
+    """The stored report when it matches the current base, otherwise a fresh one. `pr-section` must never
+    say `not computed`: a missing report is a check that has not run, and the reader cannot tell the
+    difference between that and a clean result."""
+    if root is None:
+        return None
+    stored = latest_references_report(root)
+    if stored and stored.get("base") == diff_base(root):
+        return stored
+    report = references_report(root)
+    write_references_report(root, report)
+    return report
 
 
 # ------------------------------------------------------ randomized suite
