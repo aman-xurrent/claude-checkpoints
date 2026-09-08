@@ -1401,9 +1401,17 @@ def fence_deny_rules():
     rules = ["Bash(git push --no-verify*)", "Bash(git push * --no-verify*)", "Bash(git commit --no-verify*)", "Bash(git commit -n*)",
              "Bash(git -c core.hooksPath*)", "Bash(git config * core.hooksPath*)", "Bash(* skip-once*)", "Bash(phased pause*)",
              "Bash(phased resume*)", "Bash(launchctl *)"]
-    for pattern in protected:
-        rules += [f"Edit({pattern})", f"Write({pattern})", f"MultiEdit({pattern})"]
+    # Only `Edit(path)` rules take part in file permission checks, and an Edit rule covers every
+    # file-editing tool. `Write(path)` and `MultiEdit(path)` rules are ignored and warned about at startup.
+    rules += [f"Edit({pattern})" for pattern in protected]
     return rules
+
+
+def stale_fence_rules(deny):
+    """Rules earlier versions wrote that Claude Code rejects or ignores: the triple-slash absolute form,
+    and the Write and MultiEdit path rules."""
+    return [rule for rule in deny
+            if "(///" in rule or rule.startswith(("Write(/", "Write(**", "Write(~", "MultiEdit("))]
 
 
 def ensure_fence(root):
@@ -1412,7 +1420,7 @@ def ensure_fence(root):
     settings = read_json(settings_path, default={}) or {}
     permissions = settings.setdefault("permissions", {})
     deny = permissions.setdefault("deny", [])
-    stale = [rule for rule in deny if "(///" in rule]
+    stale = stale_fence_rules(deny)
     for rule in stale:
         deny.remove(rule)
     added = [rule for rule in fence_deny_rules() if rule not in deny]

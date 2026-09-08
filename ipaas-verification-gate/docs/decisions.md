@@ -299,3 +299,17 @@ change re-proved `pass` with a real red run, and Stop no longer calls it stale.
 **Silence read as "did not run".** Stop said nothing when no definition was removed, and `pr-section`
 printed `not computed` when no report existed. Stop now states the outcome either way, and `pr-section`
 computes the report when it is missing or stale rather than reporting its own absence.
+
+## 21. The fence writes Edit rules only
+
+Claude Code printed a warning per rule at every ipaas session start: `MultiEdit(path)` matches no known
+tool, and `Write(path)` is not consulted by file permission checks. Only `Edit(path)` rules take part, and
+an Edit rule covers every file-editing tool. `fence_deny_rules` now emits one `Edit(...)` per protected
+path, and `ensure_fence` removes the rules earlier versions wrote (the `Write` and `MultiEdit` variants and
+the triple-slash absolute form) when it refreshes a worktree. Seventeen rules per worktree, none rejected.
+
+The startup also reported a `SessionStart` hook error. It belongs to the `agent-skills` plugin, not to the
+gate: its hook pasted a whole `SKILL.md` into a JSON string built by a shell heredoc, so the raw newlines
+made the payload invalid. SessionStart adds plain stdout to the context, so the local copy at
+`~/.claude/plugins/cache/addy-agent-skills/agent-skills/1.0.0/hooks/session-start.sh` now prints the file
+as text, with the original kept as `.bak`. A plugin update will overwrite it.
