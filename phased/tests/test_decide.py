@@ -50,7 +50,35 @@ class DecideTest(unittest.TestCase):
         self.assertIsNone(decide(state(), facts([approval(review_state="CHANGES_REQUESTED")]), ME))
 
     def test_new_comment_on_a_blocking_thread_wins_over_approval(self):
-        self.assertEqual(decide(state(), facts([approval()], [thread()]), ME), AddressComments(("T1",), "2026-09-07T10:30:00Z"))
+        self.assertEqual(decide(state(), facts([approval()], [thread()]), ME), AddressComments(("T1",), (), "2026-09-07T10:30:00Z"))
+
+    def test_a_conversation_comment_that_is_not_an_approval_is_feedback(self):
+        feedback = comment(body="RunbookPresenter should take a param and only then process last_job.", comment_id="C9")
+        self.assertEqual(decide(state(), facts(comments=[feedback]), ME), AddressComments((), ("C9",), "2026-09-07T11:00:00Z"))
+
+    def test_feedback_and_a_thread_come_together(self):
+        feedback = comment(body="also rename the prop", comment_id="C9")
+        action = decide(state(), facts(comments=[feedback], threads=[thread()]), ME)
+        self.assertEqual(action, AddressComments(("T1",), ("C9",), "2026-09-07T11:00:00Z"))
+
+    def test_a_seen_feedback_comment_does_not_fire_again(self):
+        feedback = comment(body="rename the prop", comment_id="C9")
+        current = {**state(), "seen_comment_ids": ["C9"]}
+        self.assertIsNone(decide(current, facts(comments=[feedback]), ME))
+
+    def test_a_ghmention_comment_is_not_feedback(self):
+        mention = comment(body="@claude please explain this", comment_id="C9")
+        self.assertIsNone(decide(state(), facts(comments=[mention]), ME))
+
+    def test_a_teammate_comment_is_not_feedback(self):
+        self.assertIsNone(decide(state(), facts(comments=[comment(body="looks odd", author="tushar")]), ME))
+
+    def test_feedback_older_than_the_handoff_does_nothing(self):
+        self.assertIsNone(decide(state(), facts(comments=[comment(body="old note", at="2026-09-07T09:30:00Z")]), ME))
+
+    def test_feedback_wins_over_an_approval_in_the_same_batch(self):
+        action = decide(state(), facts([approval()], comments=[comment(), comment(body="one more thing", comment_id="C9")]), ME)
+        self.assertEqual(action, AddressComments((), ("C9",), "2026-09-07T11:00:00Z"))
 
     def test_blocking_thread_without_new_comment_holds(self):
         self.assertIsNone(decide(state(), facts([approval()], [thread(at="2026-09-07T09:00:00Z")]), ME))

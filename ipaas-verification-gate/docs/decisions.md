@@ -313,3 +313,21 @@ gate: its hook pasted a whole `SKILL.md` into a JSON string built by a shell her
 made the payload invalid. SessionStart adds plain stdout to the context, so the local copy at
 `~/.claude/plugins/cache/addy-agent-skills/agent-skills/1.0.0/hooks/session-start.sh` now prints the file
 as text, with the original kept as `.bak`. A plugin update will overwrite it.
+
+## 22. Conversation comments are feedback, and discovery runs through two skills
+
+The user left a conversation comment on PR 1027 asking for a different `RunbookPresenter` shape, and the
+loop ignored it: `decide` read conversation comments only as approvals, and review threads only as feedback.
+A comment on the conversation tab is how a reviewer asks for a change that belongs to no single line, so the
+approver's comments now count as feedback unless the comment is the approval itself. Ones carrying `@claude`
+are skipped, because those belong to ghmention and reading them would make the two daemons answer each
+other. `AddressComments` carries both thread and comment ids, the brief renders both, and the state records
+`seen_comment_ids` so a comment fires once. Twenty-seven decision tests.
+
+Phase 1 changed with it, by the user's instruction: discovery reads every comment already on the pull
+request and lists what each changes in the plan, or answers it with a reason, and the discovery content goes
+through `/agent-skills:code-simplification` and `/edge-case-hunter` before the plan is written, with what
+each returned named in the PR description. `phase-comments` answers a conversation comment with a
+conversation comment and runs a skill a comment names.
+
+Verified on PR 1027: the daemon typed the feedback into the live window `pr1027` at the next tick.

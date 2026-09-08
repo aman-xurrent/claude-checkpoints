@@ -14,19 +14,39 @@ Start with the phase start in `.claude/skills/phase/ceremony.md` (N = 1).
 
 1. Read the request end to end: subject, requirement, design, risk analysis, notes. Name the outcome the
    requester wants in one sentence; that sentence heads the PR description.
-2. Prior work: `git log --oneline --grep=<key words> origin/main | head`, closed PRs on the topic
+2. Read every comment already on the pull request, when one exists, and treat each as a requirement of this
+   phase. A conversation comment carries a decision the request does not:
+
+   ```bash
+   GH_HOST=git.4me.com gh api graphql -f owner=4me -f repo=ipaas -F pr=<n> -f query='
+     query($owner:String!,$repo:String!,$pr:Int!){ repository(owner:$owner,name:$repo){ pullRequest(number:$pr){
+       comments(last:50){ nodes{ author{login} createdAt body } }
+       reviewThreads(first:100){ nodes{ isResolved isOutdated path line
+         comments(first:20){ nodes{ author{login} body } } } } } } }'
+   ```
+
+   List each comment in the discovery section with what it changes in the plan. A comment you decide not to
+   follow is answered in the PR with the reason, never dropped in silence.
+3. Prior work: `git log --oneline --grep=<key words> origin/main | head`, closed PRs on the topic
    (`GH_HOST=git.4me.com gh pr list --state merged --search "<key words>"`), and the notes on the request.
-3. Similar code: find the closest existing feature and read it whole. Use Serena (`find_symbol`,
+4. Similar code: find the closest existing feature and read it whole. Use Serena (`find_symbol`,
    `find_referencing_symbols`) and `python3 ~/personal/scripts/gate/gate.py references --name <symbol>` for
    every symbol the change will touch. Read every file involved from top to bottom, not the hits alone.
-4. Read `AGENTS.md` and the `AGENTS.md` of each sub-project involved.
-5. Write the scratch plan by phase:
+5. Read `AGENTS.md` and the `AGENTS.md` of each sub-project involved.
+6. Run the discovery content through both skills before you write the plan, and fold what they return into it:
+   - `/agent-skills:code-simplification` over the code you are about to change: the simplest shape that meets
+     the intent, the duplication to fold, the abstraction not worth adding.
+   - `/edge-case-hunter` over the requirement and the code paths: every branch and boundary the feature must
+     handle, and which of them nothing handles today.
+   Name both in the discovery section with what each returned. A skill that returns nothing worth acting on
+   is recorded as that, not left out.
+7. Write the scratch plan by phase:
    - Phase 2: which structures, models, types, migrations change, in which files.
    - Phase 3: which methods and functions are new or change signature, which constants, which abstract classes.
    - Phase 4: the change points in running code that get a TODO marker, by file.
    - Phase 6: the impossible states the feature must assert.
    - Phase 7: what proves the feature works: the spec example the gate proof will declare, the live check.
-6. Do not create tests. Do not change code.
+8. Do not create tests. Do not change code.
 
 ## Done criteria
 
@@ -35,10 +55,13 @@ Start with the phase start in `.claude/skills/phase/ceremony.md` (N = 1).
 - [ ] `AGENTS.md` and the sub-project rules were read.
 - [ ] Every file involved in the change was read and understood.
 - [ ] Prior and similar work was found and named with paths.
+- [ ] Every existing pull request comment is listed with what it changes in the plan, or answered with a reason.
+- [ ] `/agent-skills:code-simplification` and `/edge-case-hunter` were run and their findings are folded in.
 - [ ] The plan by phase is written in the PR description.
 
 ## Handoff
 
 The PR description: the outcome sentence, `## Request` (link), `## Discovery` (prior work, similar code,
-files involved with paths, risks), `## Plan by phase`, `## Phase 1` checklist. Commit empty:
+files involved with paths, risks, what the two skills returned, and every comment with its effect on the
+plan), `## Plan by phase`, `## Phase 1` checklist. Commit empty:
 `Request#<id> Phase 1: discovery`. Then the handoff in `ceremony.md`.

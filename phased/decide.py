@@ -53,6 +53,9 @@ class Facts:
 
 
 APPROVAL_WORD = "approved"
+# A comment carrying this marker belongs to the other daemon (ghmention). Reading it as feedback would
+# make the two answer each other.
+MENTION_MARKER = "@claude"
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,7 @@ class StartPhase:
 @dataclass(frozen=True)
 class AddressComments:
     thread_ids: tuple
+    comment_ids: tuple
     newest_comment_at: str
 
 
@@ -119,6 +123,18 @@ def approving_comment(state, facts, me):
     return None
 
 
+def feedback_comments(state, facts, me):
+    """The approver's conversation comments are feedback unless they are the approval itself. A comment on
+    the conversation tab is how a reviewer asks for a change that belongs to no single line, and dropping
+    those left the request waiting on an approval the approver never meant to give."""
+    handoff_at = parse_time(state["handoff_at"])
+    spent = set(state.get("consumed_approval_ids", [])) | set(state.get("seen_comment_ids", []))
+    return [comment for comment in facts.comments
+            if comment.author == me and comment.id not in spent
+            and not is_approval_text(comment.body) and MENTION_MARKER not in comment.body
+            and parse_time(comment.created_at) > handoff_at]
+
+
 def decide(state, facts, me) -> Optional[object]:
     if state["status"] == STATUS_DONE:
         return None
@@ -127,11 +143,12 @@ def decide(state, facts, me) -> Optional[object]:
     if state["status"] != STATUS_WAITING:
         return None
     handoff_at = parse_time(state["handoff_at"])
-    new_feedback = [thread for thread in blocking_threads(facts)
-                    if parse_time(thread.last_comment_at) > handoff_at and thread.last_comment_author != "phased"]
-    if new_feedback:
-        newest = max(thread.last_comment_at for thread in new_feedback)
-        return AddressComments(tuple(thread.id for thread in new_feedback), newest)
+    new_threads = [thread for thread in blocking_threads(facts)
+                   if parse_time(thread.last_comment_at) > handoff_at and thread.last_comment_author != "phased"]
+    new_comments = feedback_comments(state, facts, me)
+    if new_threads or new_comments:
+        newest = max([thread.last_comment_at for thread in new_threads] + [comment.created_at for comment in new_comments])
+        return AddressComments(tuple(thread.id for thread in new_threads), tuple(comment.id for comment in new_comments), newest)
     if blocking_threads(facts):
         return None
     approval = approving_review(state, facts, me) or approving_comment(state, facts, me)
