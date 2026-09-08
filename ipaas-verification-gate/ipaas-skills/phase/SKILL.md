@@ -38,6 +38,7 @@ and the handoff. The handoff and the phase start are the same for every phase: `
 
 - No phase is skipped. "Go to phase 4" means phases 2, 3 and 4 in order, each with its own approval.
 - One commit per phase, subject `Request#<id> Phase N: <what>`. A phase with no changeset commits empty.
+  Phases 1 to 5 carry `[skip ci]`, written by the commit hook; phases 6 and 7 run the full CI.
 - Never start phase N+1 on your own. The approval of the phase N commit starts it.
 - `.claude/bin/agent_task_finalize --phase N` must exit 0 before a handoff. It checks the shape of the diff
   for the phase, then applies the branch state to the checks worktree, runs rubocop, yarn, and for phases 6

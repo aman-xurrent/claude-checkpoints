@@ -23,7 +23,10 @@ branch name `requests/<id>-*`, `<n>` the PR number.
    rerun. Never hand off on a failure, never skip a check.
 2. Commit with `/commit`. Subject: `Request#<id> Phase N: <what>`. One commit per phase. A phase without a
    changeset: `git commit --allow-empty -m "Request#<id> Phase N: <what>"` (the co-author trailer is added by
-   the hook, the `Phase: N` trailer by `prepare-commit-msg`). When finalize made you fix something after the
+   the hook, the `Phase: N` trailer by `prepare-commit-msg`). On phases 1 to 5 that hook also writes
+   `[skip ci]` into the body, because those phases add no behaviour and CI has nothing to test. Do not write
+   a skip keyword yourself on phase 6 or 7: those must run CI, and `pre-push` refuses a commit that carries
+   one. When finalize made you fix something after the
    commit, amend that one commit.
 3. `git push -u origin HEAD`.
 4. The PR.

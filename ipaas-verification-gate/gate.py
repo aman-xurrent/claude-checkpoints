@@ -80,7 +80,7 @@ LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
-                         "**/.claude/bin/agent_task_finalize",
+                         "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -121,6 +121,12 @@ PHASE_FILE_NAME = "phase"
 PHASE_TRAILER = "Phase"
 PHASES = range(1, 8)
 PROOF_EXEMPT_PHASES = {1, 2, 3, 4, 5}
+# Phases 1 to 5 add no behaviour, so their commits skip CI. Any of the five bracket keywords works, in
+# the subject or the body; the hook writes one and pre-push refuses one on a phase that must run CI.
+CI_SKIP_PHASES = PROOF_EXEMPT_PHASES
+CI_SKIP_KEYWORD = "[skip ci]"
+CI_SKIP_PATTERN = re.compile(r"\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]", re.IGNORECASE)
+TRAILER_LINE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s")
 CONNECTOR_CORE = ("connector/lib/ipaas/connector/", "connector/lib/ipaas/job/", "connector/lib/ipaas/test_case/")
 PLATFORM_LOGIC = ("platform/app/models/", "platform/app/controllers/", "platform/app/services/", "platform/app/jobs/",
                   "platform/app/presenters/")
@@ -837,11 +843,46 @@ def commit_msg(arguments):
     phase = phase_number(root)
     if phase is not None:
         trailers.append((PHASE_TRAILER, str(phase)))
+        write_ci_skip(message_path, phase)
     trailers.extend(proof_trailers(root, message_path))
     if not trailers:
         return
     for trailer, value in trailers:
         git(root, "interpret-trailers", "--in-place", "--if-exists", "replace", "--trailer", f"{trailer}: {value}", str(message_path))
+
+
+def write_ci_skip(message_path, phase):
+    """Put the keyword in the body of a phase 1 to 5 commit, above git's comment block so a verbose commit
+    template cannot cut it off. One keyword is enough; an existing one of any spelling is left alone."""
+    if phase not in CI_SKIP_PHASES:
+        return
+    text = message_path.read_text()
+    if CI_SKIP_PATTERN.search(text):
+        return
+    lines = text.splitlines()
+    index = ci_skip_insertion_point(lines)
+    block = [CI_SKIP_KEYWORD, ""]
+    if index > 0 and lines[index - 1].strip():
+        block.insert(0, "")
+    lines[index:index] = block
+    message_path.write_text("\n".join(lines).rstrip("\n") + "\n")
+
+
+def ci_skip_insertion_point(lines):
+    """Above the trailing trailer block, and above git's comment block, so the keyword stays in the body and
+    the trailers stay one block."""
+    # git cuts everything from its comment block, the verbose diff included, so that is the ceiling.
+    ceiling = next((number for number, line in enumerate(lines) if line.startswith("#")), len(lines))
+    index = ceiling
+    for number in range(ceiling - 1, -1, -1):
+        line = lines[number]
+        if not line.strip():
+            continue
+        if TRAILER_LINE.match(line):
+            index = number
+            continue
+        break
+    return index
 
 
 def proof_trailers(root, message_path):
@@ -943,6 +984,9 @@ def commit_violations(root, sha):
     if trailer_value(body, REFERENCES_VERDICT_TRAILER) == VERDICT_USED:
         return [f"{short}: references verdict is {VERDICT_USED}; a removed or renamed name is still referenced"]
     phase = trailer_value(body, PHASE_TRAILER)
+    if phase and phase.isdigit() and int(phase) not in CI_SKIP_PHASES and CI_SKIP_PATTERN.search(body):
+        return [f"{short}: phase {phase} must run CI, and this message carries "
+                f"`{CI_SKIP_PATTERN.search(body).group(0)}`. Remove it and amend."]
     if phase and phase.isdigit() and int(phase) in PROOF_EXEMPT_PHASES:
         return []
     proof_id = trailer_value(body, PROOF_ID_TRAILER)

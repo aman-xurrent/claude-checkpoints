@@ -351,3 +351,15 @@ The guard denies `gh pr comment`, `gh pr review`, `gh pr-review reply`, the comm
 `issues/<n>/comments` unless the command runs the wrapper. Resolving a thread, editing the pull request
 description, reading comments and `gh pr ready` stay direct: none of them posts a comment. Verified on ten
 command shapes, five denied and five allowed.
+
+## 24. Phases 1 to 5 skip CI
+
+Those phases change structures, contracts, markers and an audit, so the full matrix has nothing to test and
+burns eight jobs per phase. `prepare-commit-msg` now writes `[skip ci]` into the body of a phase 1 to 5
+commit, above the trailer block and above git's comment block, so the trailers stay one block and a verbose
+commit template cannot cut the keyword off. Any of the five spellings already present is left alone
+(`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`, in the subject or the body).
+
+Phases 6 and 7 must run CI, so `pre-push` refuses a commit of those phases whose message carries any of the
+five keywords, naming the one it found. Verified on four message shapes, including a verbose template, and
+on real phase 2, 4 and 7 commits.

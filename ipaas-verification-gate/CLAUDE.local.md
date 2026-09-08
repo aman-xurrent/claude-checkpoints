@@ -59,6 +59,8 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
 - The active phase is the number in `.claude/proof/phase`. `prepare-commit-msg` stamps it as `Phase: N`.
 - `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`.
   Phases 6 and 7 need a passing, fresh proof like any other Claude commit.
+- `prepare-commit-msg` writes `[skip ci]` into the body of a phase 1 to 5 commit: those phases add no
+  behaviour, so CI has nothing to test. Never write a skip keyword on phase 6 or 7; `pre-push` refuses it.
 - `.claude/bin/agent_task_finalize --phase N` must exit 0 before a handoff: the shape of the diff for the
   phase (locations, stubs, TODO markers), then rubocop, yarn check and lint and, for phases 6 and 7, the
   specs, all run in the checks worktree `~/work/ipaas_worktrees/checks` (one permanent slot, reset to
