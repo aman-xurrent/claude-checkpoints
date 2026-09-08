@@ -34,7 +34,7 @@ Start with the phase start in `.claude/skills/phase/ceremony.md` (N = 1).
    every symbol the change will touch. Read every file involved from top to bottom, not the hits alone.
 5. Read `AGENTS.md` and the `AGENTS.md` of each sub-project involved.
 6. Run the discovery content through both skills before you write the plan, and fold what they return into it:
-   - `/agent-skills:code-simplification` over the code you are about to change: the simplest shape that meets
+   - `/agent-skills:code-simplify` over the code you are about to change: the simplest shape that meets
      the intent, the duplication to fold, the abstraction not worth adding.
    - `/edge-case-hunter` over the requirement and the code paths: every branch and boundary the feature must
      handle, and which of them nothing handles today.
@@ -56,7 +56,7 @@ Start with the phase start in `.claude/skills/phase/ceremony.md` (N = 1).
 - [ ] Every file involved in the change was read and understood.
 - [ ] Prior and similar work was found and named with paths.
 - [ ] Every existing pull request comment is listed with what it changes in the plan, or answered with a reason.
-- [ ] `/agent-skills:code-simplification` and `/edge-case-hunter` were run and their findings are folded in.
+- [ ] `/agent-skills:code-simplify` and `/edge-case-hunter` were run and their findings are folded in.
 - [ ] The plan by phase is written in the PR description.
 
 ## Handoff

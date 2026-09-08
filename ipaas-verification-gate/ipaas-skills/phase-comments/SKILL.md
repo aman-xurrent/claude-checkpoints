@@ -15,7 +15,7 @@ on the pull request itself. Both are requests from the approver. `N` is the curr
 1. Read every listed item and the code it points at. Do what it asks within the phase's rules (phase 2
    structures only, phase 3 contracts only, and so on). When an item asks for something the phase forbids,
    say so in the answer and leave it for the phase it belongs to. A comment that names a skill (for example
-   `/agent-skills:code-simplification` or `/edge-case-hunter`) means run that skill and fold its findings in.
+   `/agent-skills:code-simplify` or `/edge-case-hunter`) means run that skill and fold its findings in.
 2. Fix, then verify: `.claude/bin/agent_task_finalize --phase N` must exit 0.
 3. Answer a conversation comment with a conversation comment naming what changed, file and line:
 

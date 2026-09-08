@@ -326,8 +326,10 @@ other. `AddressComments` carries both thread and comment ids, the brief renders 
 
 Phase 1 changed with it, by the user's instruction: discovery reads every comment already on the pull
 request and lists what each changes in the plan, or answers it with a reason, and the discovery content goes
-through `/agent-skills:code-simplification` and `/edge-case-hunter` before the plan is written, with what
-each returned named in the PR description. `phase-comments` answers a conversation comment with a
+through `/agent-skills:code-simplify` and `/edge-case-hunter` before the plan is written, with what
+each returned named in the PR description. The plugin ships that skill as a slash command whose
+directory is named `code-simplification`; Claude Code exposes both names, and the skills use
+`code-simplify`, the one the user invokes. `phase-comments` answers a conversation comment with a
 conversation comment and runs a skill a comment names.
 
 Verified on PR 1027: the daemon typed the feedback into the live window `pr1027` at the next tick.
