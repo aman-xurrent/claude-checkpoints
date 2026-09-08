@@ -363,3 +363,22 @@ commit template cannot cut the keyword off. Any of the five spellings already pr
 Phases 6 and 7 must run CI, so `pre-push` refuses a commit of those phases whose message carries any of the
 five keywords, naming the one it found. Verified on four message shapes, including a verbose template, and
 on real phase 2, 4 and 7 commits.
+
+## 25. pre-push audits what the push adds, not a range
+
+A session on PR 1027 was refused its phase 2 push over two commits it never wrote, both already on
+`origin/main`. Its diagnosis was right: `pre_push` audited `<old remote tip>..<new tip>`, and the ceremony
+had it rebase because the branch was four commits behind. After a rebase the old tip is no longer an
+ancestor, so that range fills with the upstream commits the branch was rebased onto. Every phase after a
+rebase would have been blocked the same way, and the only ways out the session could see were a user skip
+token or undoing the rebase.
+
+`pushed_revisions` now asks what the push actually adds: everything reachable from the new tip and from no
+remote-tracking ref, minus the tip being replaced (`rev-list <local> --not --remotes [<remote tip>]`). That
+is the question the gate always meant to ask, and it is what the branch already did for a new branch, where
+no remote tip exists. `commit_violations` also returns early for a commit already reachable from the
+upstream branch, which covers a stale remote-tracking ref.
+
+Reproduced first, then verified: a branch rebased onto four newer commits audited five commits before and
+one after, and the session's own case, a phase 2 commit force-pushed after a rebase, now passes. A commit
+that genuinely owes a proof is still refused.

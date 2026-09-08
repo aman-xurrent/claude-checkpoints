@@ -924,10 +924,7 @@ def pre_push():
         _, local_sha, _, remote_sha = parts
         if local_sha == ZERO_SHA:
             continue
-        if remote_sha == ZERO_SHA:
-            revisions = git(root, "rev-list", local_sha, "--not", "--remotes").stdout.split()
-        else:
-            revisions = git(root, "rev-list", f"{remote_sha}..{local_sha}").stdout.split()
+        revisions = pushed_revisions(root, local_sha, remote_sha)
         for sha in revisions:
             violations.extend(commit_violations(root, sha))
     if not violations:
@@ -973,8 +970,24 @@ def skip_once(arguments):
     print(f"gate: the next refused push within 15 minutes goes through once. Reason on record: {reason}")
 
 
+def pushed_revisions(root, local_sha, remote_sha):
+    """What this push actually adds to the remote: everything reachable from the new tip and from no
+    remote-tracking ref, and not from the tip being replaced.
+
+    `<remote tip>..<local>` was wrong after a rebase. The old tip stops being an ancestor, so the range fills
+    with the upstream commits the branch was rebased onto and the gate blamed the session for other people's
+    work. Excluding every remote-tracking ref answers the real question: which commits has nobody pushed yet."""
+    excluded = ["--remotes"] + ([remote_sha] if remote_sha != ZERO_SHA else [])
+    return git(root, "rev-list", local_sha, "--not", *excluded, allow_exit_codes=(0, 128)).stdout.split()
+
+
+def already_upstream(root, sha):
+    completed = git(root, "merge-base", "--is-ancestor", sha, UPSTREAM_BRANCH, allow_exit_codes=(0, 1, 128))
+    return completed.returncode == 0
+
+
 def commit_violations(root, sha):
-    if not is_gated_commit(root, sha):
+    if already_upstream(root, sha) or not is_gated_commit(root, sha):
         return []
     body = git(root, "log", "-1", "--format=%B", sha).stdout
     files = git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", sha).stdout.split()
