@@ -432,3 +432,41 @@ use a process id at all, because the worktree is held across several short gate 
 The tmux configuration lives in `~/.tmux.conf`, outside both repositories, so the ownership rule is
 written down here and in `phased/README.md`. `phased/tmux-resurrect-prune` keeps the last 120 saves,
 because resurrect never deletes one.
+
+## 28. The proof tier runs vitest as well as rspec
+
+A session reported that its push was blocked with no way out: `commit_violations` counts `.ts` and `.tsx`
+as code and demands a `Proof-Id` (gate.py:1084, :1096), while the prover only ran `bundle exec rspec`.
+A TypeScript-only change could not produce a passing proof, and only `STATUS_PASS` satisfies the push
+check (gate.py:1101), so `STATUS_DEFERRED` was no way round it either. The gate had a dead end, and its
+only exit was the user's skip token. That is a gate that punishes a whole language, so the tier was built
+rather than the change waved through.
+
+`prove_one` now picks the runner from the test file: `is_javascript_test` (under `platform/app/javascript/`,
+named as a test, with a JS or TS suffix) selects `vitest`, everything else stays `rspec`. The revert proof
+itself is unchanged, because it never depended on the runner: revert the code hunks, run the declared
+example, require red; restore, require green; then repeat.
+
+Three details of vitest 4 that the proof logic depends on, each measured rather than assumed:
+
+- `-t` filters by substring and reports every other test in the file as `skipped`, so the "exactly one
+  example" rule counts the assertions that actually ran, never `numTotalTests`.
+- A file that fails to load reports a failed suite with **no** assertion result at all. That is the
+  analogue of rspec's errors outside examples, and it is the expected red for a change that adds an
+  export the test imports. Without mapping it, a load error would read as zero failures and the red run
+  would look vacuous.
+- `--sequence.shuffle` with `--sequence.seed` changes nothing the JSON report can show: the report lists
+  results in declared order under every seed and both flag spellings. So the flake tier repeats the file
+  three times in its declared order and records `shuffled: false` in the findings. It is weaker than the
+  rspec tier and says so, rather than claiming a random order that never ran.
+
+Verified end to end on a real change (days in `formatDuration`, with the example that proves it): the
+proof came back `pass` in 20 seconds with `runner: vitest`, red 1 failure and green 0, and `pre-push`
+accepted the commit stamped `Proof-Status: pass`. The teeth still bite: an existing example that does not
+depend on the change came back `vacuous`, and an example that does not exist came back
+`ambiguous_declaration`.
+
+The trace added in decision 26 settled what had actually happened: every `pre-push` call in the record
+exited 0, including the two real pushes that ran while the report was being written. No push had been
+refused. The change sits uncommitted in its worktree, so the refusal was still ahead of it, correctly
+predicted from the code.

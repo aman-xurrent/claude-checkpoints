@@ -92,6 +92,18 @@ decisions hold in every permission mode, auto included.
 | `docs/plan.md`, `docs/decisions.md`, `docs/tool-verdicts.md` | The plan, every decision with its reason and retractions, and the review of ten code-search tools. |
 | `docs/diagrams/` | Two Excalidraw diagrams of the flakes the gate found. |
 
+## Two runners, one proof
+
+The proof picks its runner from the declared test file. A test under `platform/app/javascript/` with a JS
+or TS suffix runs under `yarn vitest run <file> -t <example>`; everything else runs under
+`bundle exec rspec <file> -e <example>`. The revert proof is the same either way: revert the code hunks,
+require the example to fail, restore them, require it to pass.
+
+The vitest tier differs in two ways worth knowing. A file that fails to load counts as red, which is the
+expected result for a change that adds an export the test imports. And the flake tier repeats the file
+three times in its declared order, recording `shuffled: false`, because vitest's report lists results in
+declared order under every seed, so a random order cannot be evidenced.
+
 ## The record of every call
 
 Every gate call writes one JSON line to `~/.local/state/gate/trace/<date>.jsonl`: the time, the

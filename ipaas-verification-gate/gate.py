@@ -169,6 +169,7 @@ GATE_EPOCH = "2026-09-06T00:00:00+00:00"
 RBENV_SHIMS = HOME / ".rbenv/shims"
 HOMEBREW_BIN = Path("/opt/homebrew/bin")
 RSPEC_TIMEOUT_SECONDS = 900
+VITEST_TIMEOUT_SECONDS = 600
 FULL_SUITE_TIMEOUT_SECONDS = 3600  # spec/unit takes 17 to 28 minutes in the gate
 FLAKE_SEEDS = (11, 22, 33)
 RANDOMIZED_SUITE_SEED = 11
@@ -723,6 +724,52 @@ def rspec(project, spec_file, example, order, json_path, log):
     }
 
 
+def is_javascript_test(path):
+    """A vitest test file: under platform's javascript tree, named as a test, with a JS or TS suffix."""
+    return path.startswith(JAVASCRIPT_PREFIX) and is_spec_path(path) and path.endswith(JAVASCRIPT_SUFFIXES)
+
+
+def vitest(project, test_file, example, order, json_path, log):
+    """The same contract as rspec(): run one file, optionally one example, and report the counts the
+    proof logic reads. `order` is accepted for one call shape with rspec. vitest 4 takes
+    `--sequence.shuffle` and `--sequence.seed`, but its report lists results in declared order either
+    way, so a random order cannot be evidenced from the report; a `rand:` order runs the file as
+    declared and the caller records that the run was not shuffled."""
+    command = ["yarn", "vitest", "run", test_file, "--reporter=json", f"--outputFile={json_path}"]
+    if example:
+        command += ["-t", example]
+    log("$ " + " ".join(command))
+    completed = subprocess.run(
+        command, cwd=str(GATE_WORKTREE / project), env=prover_environment(),
+        capture_output=True, text=True, timeout=VITEST_TIMEOUT_SECONDS,
+    )
+    tail = "\n".join((completed.stdout + completed.stderr).strip().splitlines()[-8:])
+    log(f"exit {completed.returncode}\n{tail}")
+    report = read_json(json_path, default={}) or {}
+    suites = report.get("testResults") or []
+
+    def ran_in(suite):
+        return [each for each in (suite.get("assertionResults") or []) if each.get("status") in ("passed", "failed")]
+
+    ran = [each for suite in suites for each in ran_in(suite)]
+    failed = [each for each in ran if each["status"] == "failed"]
+    # `-t` reports every other test in the file as skipped, so the count of examples that actually ran is
+    # what the "exactly one example" rule must read, not numTotalTests.
+    # A file that fails to load reports a failed suite with no assertion result at all. That is the
+    # analogue of rspec's errors outside examples, and it is the expected red for a change that adds a
+    # new export the test imports. Without it a load error would read as zero failures, so the red run
+    # would look vacuous.
+    collection_errors = len([suite for suite in suites if suite.get("status") == "failed" and not ran_in(suite)])
+    return {
+        "exit_code": completed.returncode,
+        "example_count": len(ran),
+        "failure_count": len(failed),
+        "errors_outside_examples": collection_errors,
+        "failed_examples": [{"description": each.get("fullName"),
+                             "message": (each.get("failureMessages") or [""])[0][:400]} for each in failed],
+    }
+
+
 def is_red(result):
     return result["failure_count"] >= 1 or result["errors_outside_examples"] >= 1
 
@@ -744,37 +791,43 @@ def prove_one(proof, spec_patch, code_patch, base_sha, run_directory, index, log
         return {**record, "status": STATUS_NOT_APPLICABLE, "reason": "the diff has no non-spec hunks to revert"}
 
     relative_spec = spec_file.split("/", 1)[1]
-    json_directory = run_directory / f"rspec-{index}"
+    javascript = is_javascript_test(spec_file)
+    run_example = vitest if javascript else rspec
+    record["runner"] = "vitest" if javascript else "rspec"
+    select_flag = "-t" if javascript else "-e"
+    json_directory = run_directory / f"{record['runner']}-{index}"
     json_directory.mkdir(exist_ok=True)
 
-    log(f"--- proof {index}: {spec_file} -e {example!r}")
+    log(f"--- proof {index}: {record['runner']} {spec_file} example {example!r}")
     reset_gate_worktree(base_sha)
     apply_patch(spec_patch, "spec hunks only", log)
-    red = rspec(project, relative_spec, example, "defined", json_directory / "red.json", log)
+    red = run_example(project, relative_spec, example, "defined", json_directory / "red.json", log)
     record["red"] = red
     if red["example_count"] != 1 and red["errors_outside_examples"] == 0:
         return {**record, "status": STATUS_AMBIGUOUS,
-                "reason": f"-e matched {red['example_count']} examples; the declaration must select exactly one"}
+                "reason": f"{select_flag} matched {red['example_count']} examples; the declaration must select exactly one"}
     if not is_red(red):
         return {**record, "status": STATUS_VACUOUS,
                 "reason": "the example passes with the change reverted, so it does not prove the change"}
 
     apply_patch(code_patch, "code hunks", log)
-    green = rspec(project, relative_spec, example, "defined", json_directory / "green.json", log)
+    green = run_example(project, relative_spec, example, "defined", json_directory / "green.json", log)
     record["green"] = green
     if green["example_count"] != 1:
-        return {**record, "status": STATUS_AMBIGUOUS, "reason": f"-e matched {green['example_count']} examples with the change applied"}
+        return {**record, "status": STATUS_AMBIGUOUS, "reason": f"{select_flag} matched {green['example_count']} examples with the change applied"}
     if not is_green(green):
         return {**record, "status": STATUS_FAILS_WITH_CHANGE, "reason": "the example fails with the change applied"}
 
     flake = []
     for seed in FLAKE_SEEDS:
-        result = rspec(project, relative_spec, "", f"rand:{seed}", json_directory / f"flake-{seed}.json", log)
-        flake.append({"seed": seed, "green": is_green(result), "failure_count": result["failure_count"],
-                      "failed_examples": result["failed_examples"]})
+        result = run_example(project, relative_spec, "", f"rand:{seed}", json_directory / f"flake-{seed}.json", log)
+        flake.append({"seed": seed, "shuffled": not javascript, "green": is_green(result),
+                      "failure_count": result["failure_count"], "failed_examples": result["failed_examples"]})
     record["flake"] = flake
     if not all(each["green"] for each in flake):
-        return {**record, "status": STATUS_FLAKY, "reason": "the spec file is not green under every seed"}
+        return {**record, "status": STATUS_FLAKY,
+                "reason": ("the test file is not green on every repeat" if javascript
+                           else "the spec file is not green under every seed")}
     return {**record, "status": STATUS_PASS}
 
 
