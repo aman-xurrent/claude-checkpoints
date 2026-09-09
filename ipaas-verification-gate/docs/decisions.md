@@ -382,3 +382,25 @@ upstream branch, which covers a stale remote-tracking ref.
 Reproduced first, then verified: a branch rebased onto four newer commits audited five commits before and
 one after, and the session's own case, a phase 2 commit force-pushed after a rebase, now passes. A commit
 that genuinely owes a proof is still refused.
+
+## 26. Every gate call is on record
+
+The gate ran inside hooks and left no evidence. When a hook misfired, the only account of it was whatever
+the session chose to repeat, which is the account of the party under review. Judging where the gate
+underperforms needs the calls themselves.
+
+`traced_main` now wraps `main`. It reads the hook payload from standard input once and hands it back to the
+subcommand, tees standard output and standard error, and writes one JSON line per call to
+`~/.local/state/gate/trace/<date>.jsonl`: time, pid, subcommand, arguments, working directory, session id,
+hook event, tool name, duration, exit code, the payload, the output, and a traceback when one is raised.
+Text is clipped at 4000 characters and files older than 14 days are deleted.
+
+Two rules keep the trace from becoming a gate of its own. `record_trace` swallows every exception, so a
+broken trace can never break a hook. Standard input is read only for the five hook subcommands (`launch`,
+`stop`, `surface`, `guard`, `pre-push`); a command the model runs from a shell keeps its own stream and
+cannot block on a pipe that stays open.
+
+`gate.py trace` reads it back: `--sessions` for one line per session with call counts and failures,
+`--session ID`, `--command NAME`, `--failures`, `--day`, `--last N`, and `--full` for the whole payload and
+answer. The directory sits under `~/.local/state/gate/`, which the fence already denies writing to, so the
+model can read its own record and cannot edit it.

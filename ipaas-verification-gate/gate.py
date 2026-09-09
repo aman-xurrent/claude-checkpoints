@@ -33,6 +33,8 @@ Subcommands
   pr-section  Markdown block for a PR description, stamped from the findings.
   randomized-suite  Run spec/unit under --order rand:SEED in the gate worktree.
   rspec       Run rspec in the gate worktree under the gate lock (never run it any other way).
+  trace       What every gate call was asked and what it answered. [--session ID] [--command NAME]
+              [--last N] [--day YYYY-MM-DD] [--failures] [--full] [--sessions]
 
 The proof: revert the non-spec hunks in an isolated worktree, run the declared
 spec example, require it to FAIL. Restore the change, require it to PASS. Then
@@ -41,6 +43,7 @@ run the spec file under several random seeds and require it to stay green.
 
 import contextlib
 import fcntl
+import io
 import hashlib
 import json
 import os
@@ -49,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -210,6 +214,16 @@ PROOF_FRESH_TRAILER = "Proof-Fresh"
 SKIP_TOKEN_FILE = GATE_WORKTREE.parent / ".gate-skip-once"
 SKIP_TOKEN_MAX_AGE_SECONDS = 15 * 60
 SKIPS_LOG = HOME / ".local/state/gate/skips.log"
+# Every gate call is recorded: what it was asked (the argument list and the hook payload on standard
+# input) and what it answered (standard output, standard error, the exit code, the time it took). A hook
+# that misfires leaves nothing in the session transcript, so without this the only evidence is what the
+# model chose to repeat. The directory sits under the skips log, which the fence already protects.
+TRACE_DIRECTORY = SKIPS_LOG.parent / "trace"
+TRACE_MAX_TEXT = 4000
+TRACE_KEEP_DAYS = 14
+# Only the hook subcommands are given their standard input here. Everything else keeps the stream
+# untouched, so a command the model runs from a shell can never block on a pipe that stays open.
+TRACE_STDIN_COMMANDS = ("launch", "stop", "surface", "guard", "pre-push")
 
 # The fence around the gate, applied to Claude's tools in every ipaas worktree by link_worktree():
 # permission deny rules for what the rule syntax can express, and the guard hook for the rest.
@@ -234,7 +248,7 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch")
+                                  "randomized-suite", "surface", "stop", "launch", "trace")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
 
@@ -2179,6 +2193,197 @@ def randomized_suite(arguments):
 
 # ------------------------------------------------------------------ main
 
+
+# ------------------------------------------------------------------ trace
+
+
+class TeeStream:
+    """Writes through to the real stream and keeps a copy. The hook protocol reads gate output from
+    standard output, so the copy must never take the place of the write."""
+
+    def __init__(self, stream, copy):
+        self.stream = stream
+        self.copy = copy
+
+    def write(self, text):
+        try:
+            self.copy.write(text)
+        except (ValueError, OSError):
+            pass
+        return self.stream.write(text)
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def clip(text, limit=TRACE_MAX_TEXT):
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n... [{len(text) - limit} more characters]"
+
+
+def prune_traces():
+    cutoff = time.time() - TRACE_KEEP_DAYS * 86400
+    for path in TRACE_DIRECTORY.glob("*.jsonl"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def record_trace(command, arguments, stdin_text, stdout_text, stderr_text, exit_code, failure, started_at):
+    """One JSON line per call. Never raises: a broken trace must not break a hook."""
+    try:
+        payload = {}
+        if stdin_text.strip().startswith("{"):
+            try:
+                payload = json.loads(stdin_text)
+            except (json.JSONDecodeError, ValueError):
+                payload = {}
+        moment = datetime.now(timezone.utc)
+        record = {
+            "at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "pid": os.getpid(),
+            "command": command,
+            "arguments": list(arguments),
+            "cwd": os.getcwd(),
+            "session": payload.get("session_id"),
+            "hook_event": payload.get("hook_event_name"),
+            "tool": payload.get("tool_name"),
+            "duration_ms": int((time.monotonic() - started_at) * 1000),
+            "exit": exit_code,
+            "stdin": clip(stdin_text),
+            "stdout": clip(stdout_text),
+            "stderr": clip(stderr_text),
+        }
+        if failure:
+            record["error"] = clip(failure)
+        TRACE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+        path = TRACE_DIRECTORY / f"{moment.strftime('%Y-%m-%d')}.jsonl"
+        with open(path, "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            handle.write(json.dumps(record) + "\n")
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        if moment.minute == 0:
+            prune_traces()
+    except Exception:  # tracing is evidence, never a gate of its own
+        pass
+
+
+def read_traces(day=None):
+    if not TRACE_DIRECTORY.exists():
+        return []
+    files = [TRACE_DIRECTORY / f"{day}.jsonl"] if day else sorted(TRACE_DIRECTORY.glob("*.jsonl"))
+    records = []
+    for path in files:
+        if not path.exists():
+            continue
+        for line in path.read_text().splitlines():
+            try:
+                records.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError):
+                continue
+    return records
+
+
+def first_line(text):
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def trace_command(arguments):
+    session = argument_after(arguments, "--session")
+    command = argument_after(arguments, "--command")
+    day = argument_after(arguments, "--day")
+    last = int(argument_after(arguments, "--last") or 40)
+    records = read_traces(day)
+    if session:
+        records = [record for record in records if (record.get("session") or "").startswith(session)]
+    if command:
+        records = [record for record in records if record.get("command") == command]
+    if "--failures" in arguments:
+        records = [record for record in records if record.get("exit") or record.get("error")]
+    if not records:
+        print(f"no gate calls recorded under {TRACE_DIRECTORY}")
+        return
+    if "--sessions" in arguments:
+        print(f"{'session':10} {'calls':>5} {'fails':>5} {'first':20} {'last':20} commands")
+        grouped = {}
+        for record in records:
+            grouped.setdefault(record.get("session") or "-", []).append(record)
+        for name, group in sorted(grouped.items(), key=lambda pair: pair[1][-1]["at"]):
+            counts = {}
+            for record in group:
+                counts[record.get("command", "?")] = counts.get(record.get("command", "?"), 0) + 1
+            failures = len([record for record in group if record.get("exit") or record.get("error")])
+            summary = " ".join(f"{command}x{count}" for command, count in sorted(counts.items(), key=lambda pair: -pair[1]))
+            print(f"{name[:8]:10} {len(group):>5} {failures:>5} {group[0]['at']:20} {group[-1]['at']:20} {summary[:60]}")
+        return
+    records = records[-last:]
+    if "--full" in arguments:
+        for record in records:
+            print("=" * 100)
+            print(f"{record['at']}  {record['command']} {' '.join(record.get('arguments', []))}  "
+                  f"exit={record.get('exit')}  {record.get('duration_ms')}ms  session={record.get('session') or '-'}")
+            print(f"cwd {record.get('cwd')}   hook {record.get('hook_event') or '-'}   tool {record.get('tool') or '-'}")
+            for name in ("stdin", "stdout", "stderr", "error"):
+                if record.get(name):
+                    print(f"--- {name} ---")
+                    print(record[name])
+        return
+    print(f"{'time':20} {'command':14} {'exit':>4} {'ms':>6} {'session':9} {'tool':12} answer")
+    for record in records:
+        answer = first_line(record.get("stdout")) or first_line(record.get("stderr")) or ("error" if record.get("error") else "")
+        print(f"{record['at']:20} {record.get('command', '?'):14} {record.get('exit', 0):>4} {record.get('duration_ms', 0):>6} "
+              f"{(record.get('session') or '-')[:8]:9} {(record.get('tool') or '-')[:12]:12} {answer[:70]}")
+
+
+def argument_after(arguments, flag, default=None):
+    if flag in arguments:
+        position = arguments.index(flag) + 1
+        if position < len(arguments):
+            return arguments[position]
+    return default
+
+
+def traced_main(argv):
+    """Runs main and records the call. Standard input is read here once and handed back to the
+    subcommand, so the payload a hook sent is on record even when the subcommand ignores it."""
+    started_at = time.monotonic()
+    command = argv[1] if len(argv) > 1 else ""
+    stdin_text = ""
+    if command in TRACE_STDIN_COMMANDS:
+        try:
+            if not sys.stdin.isatty():
+                stdin_text = sys.stdin.read()
+                sys.stdin = io.StringIO(stdin_text)
+        except (OSError, ValueError):
+            stdin_text = ""
+    out_copy, error_copy = io.StringIO(), io.StringIO()
+    real_out, real_error = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = TeeStream(real_out, out_copy), TeeStream(real_error, error_copy)
+    exit_code, failure = 0, None
+    try:
+        main(argv)
+    except SystemExit as stop:
+        exit_code = stop.code if isinstance(stop.code, int) else (0 if stop.code is None else 1)
+        raise
+    except BaseException:
+        exit_code, failure = 1, traceback.format_exc()
+        raise
+    finally:
+        sys.stdout, sys.stderr = real_out, real_error
+        record_trace(command, argv[2:], stdin_text, out_copy.getvalue(), error_copy.getvalue(),
+                     exit_code, failure, started_at)
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -2203,6 +2408,7 @@ def main(argv):
         "pr-section": lambda: pr_section(),
         "randomized-suite": lambda: randomized_suite(arguments),
         "rspec": lambda: locked_rspec(arguments),
+        "trace": lambda: trace_command(arguments),
     }
     if command not in dispatch:
         print(f"unknown subcommand {command}\n{__doc__}")
@@ -2211,4 +2417,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    traced_main(sys.argv)

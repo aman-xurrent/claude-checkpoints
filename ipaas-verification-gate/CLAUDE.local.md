@@ -20,6 +20,12 @@ gate: those commands are denied to your Bash tool. Only the user can let one pus
 shell, with `! python3 ~/personal/scripts/gate/gate.py skip-once "<reason>"`. When the gate refuses, fix
 the cause or report the refusal verbatim. The gate lives in `~/personal/scripts/gate/gate.py`.
 
+## Every gate call is recorded
+
+The gate writes each call and its answer to `~/.local/state/gate/trace/<date>.jsonl`. Read your own with
+`python3 ~/personal/scripts/gate/gate.py trace --session <id> --full`. You cannot edit that directory.
+When the gate answers something you did not expect, quote the trace line instead of describing it.
+
 ## Reference impact (Phase B)
 
 - Before renaming or deleting a symbol, run `python3 ~/personal/scripts/gate/gate.py references --name <symbol>`

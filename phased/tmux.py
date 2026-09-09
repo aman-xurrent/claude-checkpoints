@@ -4,6 +4,7 @@ starts claude with the brief."""
 import os
 import re
 import subprocess
+from pathlib import Path
 
 CLAUDE_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 CLAUDE_COMMANDS = {"claude", "node"}
@@ -43,6 +44,27 @@ def find_live_window(session, name, preferred_id=None):
     for line in tmux("list-windows", "-t", session, "-F", "#{window_id} #{window_name}", check=False).splitlines():
         window_id, _, window_name = line.partition(" ")
         if window_name == name and pane_is_claude(window_id):
+            return window_id
+    return None
+
+
+def claude_running_in(directory):
+    """The window id of any pane running Claude whose working directory is inside this path.
+
+    The window of a pull request is found by its name, so a renamed window, or one the user started by
+    hand, reads as dead. Without this check the daemon opens a second Claude on the same files."""
+    directory = Path(directory).resolve()
+    output = tmux("list-panes", "-a", "-F", "#{window_id}\t#{pane_current_command}\t#{pane_current_path}", check=False)
+    for line in output.splitlines():
+        window_id, _, rest = line.partition("\t")
+        command, _, path = rest.partition("\t")
+        if not (CLAUDE_VERSION.match(command) or command in CLAUDE_COMMANDS):
+            continue
+        try:
+            pane_directory = Path(path).resolve()
+        except OSError:
+            continue
+        if pane_directory == directory or directory in pane_directory.parents:
             return window_id
     return None
 

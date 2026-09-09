@@ -3,7 +3,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from decide import AddressComments, Comment, Facts, MarkDone, Review, StartPhase, Thread, decide, is_approval_text  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from decide import (RESUME_COOLDOWN_SECONDS, RESUME_GRACE_SECONDS, RESUME_MAX_ATTEMPTS, AddressComments,  # noqa: E402
+                    Comment, Facts, MarkDone, Review, StartPhase, Thread, decide, decide_resume,
+                    is_approval_text)
 
 ME = "aman-kumar"
 HEAD = "a" * 40
@@ -127,6 +130,62 @@ class DecideTest(unittest.TestCase):
     def test_merged_or_closed_finishes(self):
         self.assertEqual(decide(state(), facts(merged=True), ME), MarkDone("pull request merged"))
         self.assertEqual(decide(state(), facts(closed=True), ME), MarkDone("pull request closed"))
+
+
+NOW = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def stranded(status="working", attempts=0, last_resume_at=None):
+    return {"phase": 2, "status": status, "handoff_at": "2026-09-07T10:00:00Z",
+            "resume_attempts": attempts, "last_resume_at": last_resume_at}
+
+
+def resume_for(current, window_alive=False, worktree_exists=True, other_claude_running=False,
+               seconds_since_start=RESUME_GRACE_SECONDS + 1):
+    return decide_resume(current, window_alive=window_alive, worktree_exists=worktree_exists,
+                         other_claude_running=other_claude_running, now=NOW,
+                         seconds_since_start=seconds_since_start)
+
+
+class DecideResumeTest(unittest.TestCase):
+    def test_dead_window_while_working_resumes(self):
+        action = resume_for(stranded())
+        self.assertIsNotNone(action)
+        self.assertEqual(action.attempt, 1)
+
+    def test_dead_window_while_addressing_comments_resumes(self):
+        self.assertIsNotNone(resume_for(stranded(status="addressing_comments")))
+
+    def test_live_window_is_left_alone(self):
+        self.assertIsNone(resume_for(stranded(), window_alive=True))
+
+    def test_waiting_for_approval_is_left_alone(self):
+        self.assertIsNone(resume_for(stranded(status="waiting_approval")))
+
+    def test_done_is_left_alone(self):
+        self.assertIsNone(resume_for(stranded(status="done")))
+
+    def test_missing_worktree_is_left_alone(self):
+        self.assertIsNone(resume_for(stranded(), worktree_exists=False))
+
+    def test_another_claude_in_the_worktree_blocks_the_resume(self):
+        self.assertIsNone(resume_for(stranded(), other_claude_running=True))
+
+    def test_nothing_resumes_inside_the_grace_period(self):
+        self.assertIsNone(resume_for(stranded(), seconds_since_start=RESUME_GRACE_SECONDS - 1))
+
+    def test_attempts_stop_at_the_cap(self):
+        self.assertIsNone(resume_for(stranded(attempts=RESUME_MAX_ATTEMPTS)))
+        self.assertEqual(resume_for(stranded(attempts=RESUME_MAX_ATTEMPTS - 1)).attempt, RESUME_MAX_ATTEMPTS)
+
+    def test_cooldown_holds_a_second_attempt_back(self):
+        just_now = "2026-09-09T11:59:00Z"
+        self.assertIsNone(resume_for(stranded(attempts=1, last_resume_at=just_now)))
+
+    def test_after_the_cooldown_the_next_attempt_runs(self):
+        long_ago = "2026-09-09T11:00:00Z"
+        self.assertGreater((NOW - datetime(2026, 9, 9, 11, 0, tzinfo=timezone.utc)).total_seconds(), RESUME_COOLDOWN_SECONDS)
+        self.assertEqual(resume_for(stranded(attempts=1, last_resume_at=long_ago)).attempt, 2)
 
 
 if __name__ == "__main__":

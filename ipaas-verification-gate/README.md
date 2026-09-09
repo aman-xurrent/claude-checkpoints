@@ -84,13 +84,32 @@ decisions hold in every permission mode, auto included.
 
 | File | Role |
 |---|---|
-| `gate.py` | Everything. Subcommands: `setup`, `launch`, `prove`, `stop`, `surface`, `commit-msg`, `pre-push`, `references`, `pr-section`, `randomized-suite`, `rspec`. |
+| `gate.py` | Everything. Subcommands: `setup`, `launch`, `prove`, `stop`, `surface`, `commit-msg`, `pre-push`, `references`, `pr-section`, `randomized-suite`, `rspec`, `finalize`, `checks`, `link-worktree`, `trace`. |
 | `install.sh` | Idempotent installer for one repository on one machine. |
 | `unprovable.yml`, `unprovable_fixture.rb` | The dynamic-dispatch rules and their self-test. |
 | `pre-push`, `prepare-commit-msg` | Shell wrappers that find `gate.py` next to themselves. Symlinked into the repository's hooks directory. |
 | `CLAUDE.local.md` | The per-session protocol Claude follows. Copied to the repository root, excluded from its git. |
 | `docs/plan.md`, `docs/decisions.md`, `docs/tool-verdicts.md` | The plan, every decision with its reason and retractions, and the review of ten code-search tools. |
 | `docs/diagrams/` | Two Excalidraw diagrams of the flakes the gate found. |
+
+## The record of every call
+
+Every gate call writes one JSON line to `~/.local/state/gate/trace/<date>.jsonl`: the time, the
+subcommand and its arguments, the working directory, the session id, the hook event and tool, the payload
+on standard input, the output, the exit code, the duration, and a traceback when one is raised. Text is
+clipped at 4000 characters and files older than 14 days are deleted.
+
+```
+gate.py trace --sessions              one line per session: calls, failures, which subcommands
+gate.py trace --last 40               the recent calls, one line each
+gate.py trace --session <id> --full   everything one session asked and was answered
+gate.py trace --failures              only the calls that exited non-zero or raised
+gate.py trace --command stop --full   one subcommand across every session
+```
+
+Tracing never gates: `record_trace` swallows every exception, and standard input is read only for the
+hook subcommands, so a shell command can never block on it. The directory is inside the fence, so a
+session can read its own record and cannot edit it.
 
 ## Setup on a new machine
 

@@ -10,6 +10,7 @@ back to address them first. The local state file is the truth; GitHub is the eve
 
 Subcommands
   run [--once] [--dry-run]   The loop (the LaunchAgent runs this).
+  restart --pr N [--fresh]   Restart a session by hand: reuse its conversation, or --fresh for a new one.
   handoff --pr N --phase P   Called by the session at the end of a phase, from the PR worktree.
                              Registers the pull request on first use.
   status                     Every registered pull request and its phase.
@@ -24,6 +25,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,8 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import github  # noqa: E402
 import state as state_store  # noqa: E402
 import tmux  # noqa: E402
-from decide import (LAST_PHASE, STATUS_ADDRESSING, STATUS_DONE, STATUS_WAITING, STATUS_WORKING,  # noqa: E402
-                    AddressComments, MarkDone, StartPhase, decide)
+from decide import (LAST_PHASE, RESUME_MAX_ATTEMPTS, STATUS_ADDRESSING, STATUS_DONE, STATUS_WAITING,  # noqa: E402
+                    STATUS_WORKING, AddressComments, MarkDone, ResumeSession, StartPhase, decide,
+                    decide_resume)
 
 CONFIG_PATH = Path(os.environ.get("PHASED_CONFIG", Path.home() / ".config/phased/config.json")).expanduser()
 LOG_PATH = state_store.STATE_ROOT / "phased.log"
@@ -48,6 +51,8 @@ DEFAULT_CONFIG = {
     "repos": {"4me/ipaas": {"tmux": "ipaas", "path": str(Path.home() / "work/ipaas")}},
 }
 SKILLS_DIRECTORY = ".claude/skills"
+TRANSCRIPT_ROOT = Path.home() / ".claude/projects"
+STARTED_AT = time.monotonic()
 
 
 # ---------------------------------------------------------------- helpers
@@ -171,36 +176,155 @@ def comments_brief(current, raw, action):
     return "\n".join(lines) + "\n"
 
 
+def resume_brief(current, reason, resumed_conversation):
+    phase = current.get("phase")
+    pr = current["pr"]
+    opening = ("This is the same conversation you had before. " if resumed_conversation
+               else "Your earlier conversation is gone, so read the brief below from the start. ")
+    brief_line = f"The brief of this phase is `{current.get('last_brief')}`.\n" if current.get("last_brief") else ""
+    return (
+        f"# Restarting the session for {current['repo']} PR #{pr}, phase {phase} of {LAST_PHASE}\n\n"
+        f"{opening}The daemon restarted you because {reason}.\n"
+        f"Branch `{current.get('branch')}`, worktree `{current['worktree']}`, status `{current.get('status')}`.\n"
+        f"{brief_line}\n"
+        "Do not assume the work is unfinished, and do not repeat work that is already committed.\n"
+        "First find out where phase " f"{phase}" " really stands. Run these four commands and read them:\n\n"
+        "1. `git status --short`  (what is uncommitted)\n"
+        "2. `git log -3 --format='%h %s%n%b'`  (does a commit already carry the trailer `Phase: " f"{phase}" "`)\n"
+        "3. `git branch -r --contains HEAD`  (is HEAD already on the remote)\n"
+        f"4. `phased status`  (what the loop believes about PR #{pr})\n\n"
+        "Then continue from that point:\n"
+        f"- The phase {phase} work is committed and pushed, and only the handoff is missing: run\n"
+        f"  `phased handoff --pr {pr} --phase {phase}` and stop.\n"
+        f"- The work is committed but not pushed: finish the handoff ceremony (`{SKILLS_DIRECTORY}/phase/ceremony.md`).\n"
+        f"- The work is partly done: carry on with `{SKILLS_DIRECTORY}/phase-{phase}/SKILL.md` from where it stopped.\n"
+        f"- Nothing is done yet: start phase {phase} as the skill describes.\n\n"
+        f"Work in `{current['worktree']}` only. Do not start phase " f"{(phase or 0) + 1}" ".\n"
+    )
+
+
 # ------------------------------------------------------------------ acting
 
-def deliver(config, current, line, prompt_for_new_window, dry_run):
-    """Type one line into the live Claude window of this pull request, or open a new window with claude."""
+def session_name(config, current):
     repo_config = config["repos"].get(current["repo"], {})
-    session = repo_config.get("tmux") or current["repo"].split("/")[-1]
-    name = f"pr{current['pr']}"
-    window = tmux.find_live_window(session, name, current.get("window_id"))
-    if dry_run:
-        say(f"dry-run: would {'type into ' + window if window else 'open a new window in ' + session} for PR #{current['pr']}: {line[:120]}")
-        return window or "dry-run"
-    if window:
-        tmux.send_line(window, line)
-        log(f"typed into {window} ({session}:{name}) for PR #{current['pr']}")
-        return window
+    return repo_config.get("tmux") or current["repo"].split("/")[-1]
+
+
+def transcript_of(claude_session_id):
+    """Claude Code keeps one transcript per session under ~/.claude/projects/<slug>/<id>.jsonl. Without it
+    `claude --resume` has nothing to reopen."""
+    if not claude_session_id:
+        return None
+    for path in TRANSCRIPT_ROOT.glob(f"*/{claude_session_id}.jsonl"):
+        return path
+    return None
+
+
+def write_launcher(current, worktree, prompt, claude_flags):
+    launcher = state_store.pr_directory(current["repo"], current["pr"]) / "launch.sh"
+    delimiter = "PHASED_PROMPT_EOF"
+    if delimiter in prompt:
+        raise RuntimeError("the prompt contains the heredoc delimiter")
+    launcher.write_text("#!/usr/bin/env bash\n# generated by phased\n"
+                        f"cd {tmux.shell_quote(str(worktree))}\n"
+                        f"exec claude {' '.join(claude_flags)} -- \"$(cat <<'{delimiter}'\n{prompt}\n{delimiter}\n)\"\n")
+    launcher.chmod(0o755)
+    return launcher
+
+
+def open_window(config, current, prompt, claude_flags):
+    """A new tmux window running claude with the brief. Returns the window id."""
+    session = session_name(config, current)
     worktree = Path(current["worktree"])
     if not worktree.is_dir():
         raise RuntimeError(f"worktree {worktree} is gone; run phased adopt --pr {current['pr']} --phase {current['phase']} --worktree <path>")
     tmux.ensure_session(session, str(worktree))
-    launcher = state_store.pr_directory(current["repo"], current["pr"]) / "launch.sh"
-    delimiter = "PHASED_PROMPT_EOF"
-    if delimiter in prompt_for_new_window:
-        raise RuntimeError("the prompt contains the heredoc delimiter")
-    launcher.write_text("#!/usr/bin/env bash\n# generated by phased\n"
-                        f"cd {tmux.shell_quote(str(worktree))}\n"
-                        f"exec claude -- \"$(cat <<'{delimiter}'\n{prompt_for_new_window}\n{delimiter}\n)\"\n")
-    launcher.chmod(0o755)
-    window = tmux.new_window(session, name, str(worktree), str(launcher))
-    log(f"opened window {window} ({session}:{name}) for PR #{current['pr']}")
+    launcher = write_launcher(current, worktree, prompt, claude_flags)
+    window = tmux.new_window(session, f"pr{current['pr']}", str(worktree), str(launcher))
+    log(f"opened window {window} ({session}:pr{current['pr']}) with `claude {' '.join(claude_flags)}` for PR #{current['pr']}")
     return window
+
+
+def deliver(config, current, line, prompt_for_new_window, dry_run):
+    """Type one line into the live Claude window of this pull request, or open a new window with claude.
+
+    A new session is launched with `--session-id`, and the id is kept in state, so a session lost to a
+    restart can be reopened later with `claude --resume`."""
+    session = session_name(config, current)
+    name = f"pr{current['pr']}"
+    window = tmux.find_live_window(session, name, current.get("window_id"))
+    if dry_run:
+        say(f"dry-run: would {'type into ' + window if window else 'open a new window in ' + session} for PR #{current['pr']}: {line[:120]}")
+        return {"window": window or "dry-run", "claude_session_id": current.get("claude_session_id")}
+    if window:
+        tmux.send_line(window, line)
+        log(f"typed into {window} ({session}:{name}) for PR #{current['pr']}")
+        return {"window": window, "claude_session_id": current.get("claude_session_id")}
+    claude_session_id = str(uuid.uuid4())
+    window = open_window(config, current, prompt_for_new_window, [f"--session-id {claude_session_id}"])
+    return {"window": window, "claude_session_id": claude_session_id}
+
+
+def resume_session(config, current, action, dry_run):
+    """Reopen the session of a stranded pull request. The conversation is reused when its transcript is
+    still on disk, so the session keeps everything it knew."""
+    repo, pr = current["repo"], current["pr"]
+    claude_session_id = current.get("claude_session_id")
+    transcript = transcript_of(claude_session_id)
+    resumed = transcript is not None
+    prompt = resume_brief(current, action.reason, resumed)
+    if dry_run:
+        say(f"dry-run: would restart PR #{pr} ({'resume ' + str(claude_session_id) if resumed else 'new session'}), attempt {action.attempt}")
+        return
+    brief = write_brief(repo, pr, f"{current.get('phase')}-resume-{now_iso().replace(':', '')}", prompt)
+    if resumed:
+        flags = [f"--resume {claude_session_id}"]
+    else:
+        claude_session_id = str(uuid.uuid4())
+        flags = [f"--session-id {claude_session_id}"]
+    window = open_window(config, current, prompt, flags)
+    current.update({"window_id": window, "claude_session_id": claude_session_id, "last_brief": str(brief),
+                    "resume_attempts": action.attempt, "last_resume_at": now_iso()})
+    state_store.save(repo, pr, current, f"resume attempt {action.attempt} ({'same conversation' if resumed else 'new conversation'})")
+    notify(config, f"{repo} #{pr}", f"session restarted at phase {current.get('phase')} (attempt {action.attempt})")
+    say(f"PR #{pr}: session restarted in window {window} "
+        f"({'resumed ' + claude_session_id if resumed else 'new session ' + claude_session_id}), attempt {action.attempt}")
+
+
+def check_stranded(config, dry_run=False):
+    """A pull request whose session is gone. This runs before GitHub is polled and does not depend on it:
+    a stranded pull request in status working is invisible to `decide`, which only reads a pull request
+    that waits for approval."""
+    for current in state_store.all_states():
+        if current.get("status") == STATUS_DONE:
+            continue
+        repo, pr = current["repo"], current["pr"]
+        worktree = current.get("worktree") or ""
+        name = f"pr{pr}"
+        window = tmux.find_live_window(session_name(config, current), name, current.get("window_id"))
+        other = tmux.claude_running_in(worktree) if (window is None and Path(worktree).is_dir()) else None
+        action = decide_resume(current, window_alive=window is not None,
+                               worktree_exists=Path(worktree).is_dir(),
+                               other_claude_running=other is not None,
+                               now=datetime.now(timezone.utc),
+                               seconds_since_start=time.monotonic() - STARTED_AT)
+        if action is None:
+            if (current.get("status") in ("working", "addressing_comments") and window is None
+                    and current.get("resume_attempts", 0) >= RESUME_MAX_ATTEMPTS and not current.get("resume_gave_up")):
+                current["resume_gave_up"] = True
+                state_store.save(repo, pr, current, "gave up restarting the session")
+                notify(config, f"{repo} #{pr}", f"cannot restart the session after {RESUME_MAX_ATTEMPTS} tries; run phased restart --pr {pr}")
+                say(f"PR #{pr}: gave up restarting after {RESUME_MAX_ATTEMPTS} tries; run phased restart --pr {pr}")
+            if other is not None:
+                log(f"PR #{pr}: window {name} is not alive but Claude runs in {worktree} ({other}); not restarting")
+            continue
+        if ghmention_busy(repo, pr):
+            log(f"PR #{pr}: ghmention is live on this pull request; not restarting")
+            continue
+        try:
+            resume_session(config, current, action, dry_run)
+        except (RuntimeError, state_store.StaleWrite) as error:
+            log(f"{repo} #{pr}: resume failed: {error}")
 
 
 def apply_action(config, current, raw, action, dry_run):
@@ -213,10 +337,13 @@ def apply_action(config, current, raw, action, dry_run):
         brief = write_brief(repo, pr, str(action.phase), start_phase_brief(config, current, raw, action))
         line = (f"Phase {action.phase - 1} of PR #{pr} is approved. Start phase {action.phase}: read @{brief} and carry out "
                 f"{SKILLS_DIRECTORY}/phase-{action.phase}/SKILL.md to its handoff.")
-        window = deliver(config, current, line, line, dry_run)
+        delivered = deliver(config, current, line, line, dry_run)
         if dry_run:
             return
+        window = delivered["window"]
         current.update({"phase": action.phase, "status": STATUS_WORKING, "window_id": window,
+                        "claude_session_id": delivered["claude_session_id"], "last_brief": str(brief),
+                        "resume_attempts": 0, "last_resume_at": None, "resume_gave_up": False,
                         "consumed_approval_ids": current.get("consumed_approval_ids", []) + [action.approval_id],
                         "phase_started_at": now_iso()})
         state_store.save(repo, pr, current, f"start phase {action.phase}")
@@ -230,10 +357,13 @@ def apply_action(config, current, raw, action, dry_run):
         count = len(action.thread_ids) + len(action.comment_ids)
         line = (f"New review feedback on PR #{pr} (phase {current['phase']}): read @{brief}, carry out "
                 f"{SKILLS_DIRECTORY}/phase-comments/SKILL.md, then phased handoff --pr {pr} --phase {current['phase']}.")
-        window = deliver(config, current, line, line, dry_run)
+        delivered = deliver(config, current, line, line, dry_run)
         if dry_run:
             return
+        window = delivered["window"]
         current.update({"status": STATUS_ADDRESSING, "window_id": window, "comments_seen_at": action.newest_comment_at,
+                        "claude_session_id": delivered["claude_session_id"], "last_brief": str(brief),
+                        "resume_attempts": 0, "last_resume_at": None, "resume_gave_up": False,
                         "seen_comment_ids": current.get("seen_comment_ids", []) + list(action.comment_ids)})
         state_store.save(repo, pr, current, f"address {len(action.thread_ids)} thread(s) and {len(action.comment_ids)} comment(s)")
         notify(config, f"{repo} #{pr}", f"{count} piece(s) of feedback sent to the session")
@@ -260,6 +390,7 @@ def tick(config, dry_run=False):
     if state_store.paused():
         log("paused; not acting")
         return
+    check_stranded(config, dry_run)
     by_repo = {}
     for each in states:
         by_repo.setdefault(each["repo"], []).append(each)
@@ -322,7 +453,8 @@ def handoff(arguments):
     if window:
         tmux.rename_window(window, f"pr{pr}")
     current.update({"branch": branch, "request": request_number(branch), "worktree": str(root), "phase": phase,
-                    "status": STATUS_WAITING, "phase_head": head, "handoff_at": now_iso(), "window_id": window})
+                    "status": STATUS_WAITING, "phase_head": head, "handoff_at": now_iso(), "window_id": window,
+                    "resume_attempts": 0, "last_resume_at": None, "resume_gave_up": False})
     state_store.save(repo, pr, current, f"handoff phase {phase}")
     if config.get("labels"):
         github.set_label(config["gh_host"], repo, pr, f"phase:{phase}")
@@ -347,15 +479,39 @@ def adopt(arguments):
     say(f"{repo} #{pr}: adopted at phase {phase}, waiting for approval on {head[:10]}")
 
 
+def restart(arguments):
+    """The override: restart a session now, whatever the attempt counter and the cooldown say."""
+    config = load_config()
+    pr = int(argument_value(arguments, "--pr") or 0)
+    if not pr:
+        raise SystemExit("usage: phased restart --pr N [--fresh]")
+    matches = [each for each in state_store.all_states() if each["pr"] == pr]
+    if not matches:
+        raise SystemExit(f"phased: no state for PR #{pr}")
+    current = matches[0]
+    if "--fresh" in arguments:
+        current["claude_session_id"] = None
+    window = tmux.find_live_window(session_name(config, current), f"pr{pr}", current.get("window_id"))
+    if window and "--force" not in arguments:
+        raise SystemExit(f"phased: PR #{pr} already has a live Claude in window {window}; pass --force to open another")
+    other = tmux.claude_running_in(current.get("worktree") or "")
+    if other and "--force" not in arguments:
+        raise SystemExit(f"phased: Claude already runs in {current.get('worktree')} (window {other}); pass --force to open another")
+    current["resume_gave_up"] = False
+    resume_session(config, current, ResumeSession("you asked for a restart", current.get("resume_attempts", 0) + 1), False)
+
+
 def status():
     states = state_store.all_states()
     if not states:
         print(f"no registered pull requests under {state_store.STATE_ROOT}")
         return
-    print(f"{'repo':12} {'pr':>6} {'phase':>5} {'status':20} {'handoff':20} window   branch")
+    print(f"{'repo':12} {'pr':>6} {'phase':>5} {'status':20} {'handoff':20} {'window':8} {'session':10} branch")
     for each in states:
+        session_id = each.get("claude_session_id") or "-"
+        alive = "" if each.get("status") == STATUS_DONE else (" live" if tmux.window_alive(each.get("window_id")) else " dead")
         print(f"{each['repo']:12} {each['pr']:>6} {each.get('phase', '?'):>5} {each.get('status', '?'):20} "
-              f"{(each.get('handoff_at') or '')[:19]:20} {each.get('window_id') or '-':8} {each.get('branch', '')}")
+              f"{(each.get('handoff_at') or '')[:19]:20} {(each.get('window_id') or '-') + alive:8} {session_id[:8]:10} {each.get('branch', '')}")
     if state_store.paused():
         print("PAUSED")
 
@@ -390,6 +546,7 @@ def main(argv):
         "run": lambda: run_loop(arguments),
         "handoff": lambda: handoff(arguments),
         "adopt": lambda: adopt(arguments),
+        "restart": lambda: restart(arguments),
         "status": lambda: status(),
         "pause": lambda: (state_store.set_paused(True), say("paused")),
         "resume": lambda: (state_store.set_paused(False), say("resumed")),

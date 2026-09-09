@@ -2,6 +2,7 @@
 
 State is the local truth for interpretation (which phase, whether waiting, what was consumed).
 Facts are what GitHub reports this tick. The result is one Action or None."""
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -12,6 +13,16 @@ STATUS_WORKING = "working"
 STATUS_WAITING = "waiting_approval"
 STATUS_ADDRESSING = "addressing_comments"
 STATUS_DONE = "done"
+
+# A pull request in one of these statuses has a session doing the work. When that session is gone (the
+# machine restarted, tmux was killed, Claude exited), nothing on GitHub can move the loop, because the
+# loop only reads GitHub for a pull request that waits for approval. The daemon restarts the session.
+RESUME_STATUSES = (STATUS_WORKING, STATUS_ADDRESSING)
+RESUME_MAX_ATTEMPTS = 3
+RESUME_COOLDOWN_SECONDS = int(os.environ.get("PHASED_RESUME_COOLDOWN_SECONDS", 600))
+# Nothing is resumed in the first minutes after the daemon starts: at boot the network is not up yet and
+# the user is not at the machine.
+RESUME_GRACE_SECONDS = int(os.environ.get("PHASED_RESUME_GRACE_SECONDS", 180))
 
 
 @dataclass(frozen=True)
@@ -74,6 +85,12 @@ class AddressComments:
 @dataclass(frozen=True)
 class MarkDone:
     reason: str
+
+
+@dataclass(frozen=True)
+class ResumeSession:
+    reason: str
+    attempt: int
 
 
 def parse_time(text):
@@ -157,3 +174,23 @@ def decide(state, facts, me) -> Optional[object]:
     if state["phase"] >= LAST_PHASE:
         return MarkDone(f"phase {LAST_PHASE} approved by {me}")
     return StartPhase(state["phase"] + 1, approval.id)
+
+
+def decide_resume(state, *, window_alive, worktree_exists, other_claude_running, now, seconds_since_start):
+    """Whether to restart the session of a pull request whose window is gone.
+
+    Every input the caller must measure (tmux, the filesystem, the clock) arrives as an argument, so this
+    stays testable. None means leave it alone."""
+    if state.get("status") not in RESUME_STATUSES:
+        return None
+    if window_alive or not worktree_exists or other_claude_running:
+        return None
+    if seconds_since_start < RESUME_GRACE_SECONDS:
+        return None
+    attempts = state.get("resume_attempts", 0)
+    if attempts >= RESUME_MAX_ATTEMPTS:
+        return None
+    last_resume = state.get("last_resume_at")
+    if last_resume and (now - parse_time(last_resume)).total_seconds() < RESUME_COOLDOWN_SECONDS:
+        return None
+    return ResumeSession(f"no live Claude window for a pull request in status {state['status']}", attempts + 1)
