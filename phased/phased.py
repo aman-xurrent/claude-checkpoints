@@ -33,9 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import github  # noqa: E402
 import state as state_store  # noqa: E402
 import tmux  # noqa: E402
-from decide import (LAST_PHASE, RESUME_MAX_ATTEMPTS, STATUS_ADDRESSING, STATUS_DONE, STATUS_WAITING,  # noqa: E402
-                    STATUS_WORKING, AddressComments, MarkDone, ResumeSession, StartPhase, decide,
-                    decide_resume)
+from decide import (LAST_PHASE, RESUME_MAX_ATTEMPTS, RESUME_STATUSES, STATUS_ADDRESSING, STATUS_DONE,  # noqa: E402
+                    STATUS_WAITING, STATUS_WORKING, AddressComments, MarkDone, ResumeSession, StartPhase,
+                    decide, decide_resume)
 
 CONFIG_PATH = Path(os.environ.get("PHASED_CONFIG", Path.home() / ".config/phased/config.json")).expanduser()
 LOG_PATH = state_store.STATE_ROOT / "phased.log"
@@ -283,9 +283,14 @@ def resume_session(config, current, action, dry_run):
         claude_session_id = str(uuid.uuid4())
         flags = [f"--session-id {claude_session_id}"]
     window = open_window(config, current, prompt, flags)
-    current.update({"window_id": window, "claude_session_id": claude_session_id, "last_brief": str(brief),
-                    "resume_attempts": action.attempt, "last_resume_at": now_iso()})
-    state_store.save(repo, pr, current, f"resume attempt {action.attempt} ({'same conversation' if resumed else 'new conversation'})")
+    # The window is open, so the write must land. `phased restart` runs beside the daemon, and the daemon
+    # holds a copy of this state from the start of its tick; writing the copy would lose the window id.
+    fresh = state_store.load(repo, pr) or current
+    fresh.update({"window_id": window, "claude_session_id": claude_session_id, "last_brief": str(brief),
+                  "resume_attempts": action.attempt, "last_resume_at": now_iso(), "resume_gave_up": False})
+    state_store.save(repo, pr, fresh, f"resume attempt {action.attempt} ({'same conversation' if resumed else 'new conversation'})")
+    current.clear()
+    current.update(fresh)
     notify(config, f"{repo} #{pr}", f"session restarted at phase {current.get('phase')} (attempt {action.attempt})")
     say(f"PR #{pr}: session restarted in window {window} "
         f"({'resumed ' + claude_session_id if resumed else 'new session ' + claude_session_id}), attempt {action.attempt}")
@@ -295,6 +300,7 @@ def check_stranded(config, dry_run=False):
     """A pull request whose session is gone. This runs before GitHub is polled and does not depend on it:
     a stranded pull request in status working is invisible to `decide`, which only reads a pull request
     that waits for approval."""
+    restarted = set()
     for current in state_store.all_states():
         if current.get("status") == STATUS_DONE:
             continue
@@ -309,7 +315,7 @@ def check_stranded(config, dry_run=False):
                                now=datetime.now(timezone.utc),
                                seconds_since_start=time.monotonic() - STARTED_AT)
         if action is None:
-            if (current.get("status") in ("working", "addressing_comments") and window is None
+            if (current.get("status") in RESUME_STATUSES and window is None
                     and current.get("resume_attempts", 0) >= RESUME_MAX_ATTEMPTS and not current.get("resume_gave_up")):
                 current["resume_gave_up"] = True
                 state_store.save(repo, pr, current, "gave up restarting the session")
@@ -323,8 +329,11 @@ def check_stranded(config, dry_run=False):
             continue
         try:
             resume_session(config, current, action, dry_run)
+            if not dry_run:
+                restarted.add((repo, pr))
         except (RuntimeError, state_store.StaleWrite) as error:
             log(f"{repo} #{pr}: resume failed: {error}")
+    return restarted
 
 
 def apply_action(config, current, raw, action, dry_run):
@@ -390,7 +399,7 @@ def tick(config, dry_run=False):
     if state_store.paused():
         log("paused; not acting")
         return
-    check_stranded(config, dry_run)
+    restarted = check_stranded(config, dry_run)
     by_repo = {}
     for each in states:
         by_repo.setdefault(each["repo"], []).append(each)
@@ -402,6 +411,9 @@ def tick(config, dry_run=False):
             continue
         log(f"{repo}: polled {len(entries)} pull request(s), rate limit cost {rate.get('cost')} remaining {rate.get('remaining')}")
         for current in entries:
+            if (repo, current["pr"]) in restarted:
+                # This state was rewritten a moment ago, so the copy in hand is stale. Next tick reads it.
+                continue
             if current["pr"] not in fetched:
                 log(f"{repo} #{current['pr']}: not returned by GitHub")
                 continue
@@ -497,8 +509,10 @@ def restart(arguments):
     other = tmux.claude_running_in(current.get("worktree") or "")
     if other and "--force" not in arguments:
         raise SystemExit(f"phased: Claude already runs in {current.get('worktree')} (window {other}); pass --force to open another")
-    current["resume_gave_up"] = False
-    resume_session(config, current, ResumeSession("you asked for a restart", current.get("resume_attempts", 0) + 1), False)
+    try:
+        resume_session(config, current, ResumeSession("you asked for a restart", current.get("resume_attempts", 0) + 1), False)
+    except state_store.StaleWrite:
+        raise SystemExit(f"phased: the daemon wrote PR #{pr} while this restart ran; check `phased status` and try again")
 
 
 def status():
