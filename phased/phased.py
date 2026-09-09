@@ -151,6 +151,13 @@ def start_phase_brief(config, current, raw, action):
 
 def comments_brief(current, raw, action):
     lines = [f"# New review feedback on {current['repo']} PR #{current['pr']} (phase {current['phase']})\n", raw["url"], ""]
+    wanted_reviews = set(action.review_ids)
+    for node in raw["reviews"]["nodes"]:
+        if node["id"] not in wanted_reviews:
+            continue
+        lines.append(f"## Review by {(node.get('author') or {}).get('login', '?')} at {node['submittedAt']} ({node['state']})")
+        lines.append((node.get("body") or "").strip())
+        lines.append("")
     wanted_comments = set(action.comment_ids)
     for node in raw["comments"]["nodes"]:
         if node["id"] not in wanted_comments:
@@ -377,7 +384,7 @@ def apply_action(config, current, raw, action, dry_run):
         say(f"PR #{pr}: phase {action.phase} started in window {window}")
     elif isinstance(action, AddressComments):
         brief = write_brief(repo, pr, f"{current['phase']}-comments-{action.newest_comment_at.replace(':', '')}", comments_brief(current, raw, action))
-        count = len(action.thread_ids) + len(action.comment_ids)
+        count = len(action.thread_ids) + len(action.comment_ids) + len(action.review_ids)
         line = (f"New review feedback on PR #{pr} (phase {current['phase']}): read @{brief}, carry out "
                 f"{SKILLS_DIRECTORY}/phase-comments/SKILL.md, then phased handoff --pr {pr} --phase {current['phase']}.")
         delivered = deliver(config, current, line, line, dry_run)
@@ -387,10 +394,13 @@ def apply_action(config, current, raw, action, dry_run):
         current.update({"status": STATUS_ADDRESSING, "window_id": window, "comments_seen_at": action.newest_comment_at,
                         "claude_session_id": delivered["claude_session_id"], "last_brief": str(brief),
                         "resume_attempts": 0, "last_resume_at": None, "resume_gave_up": False,
-                        "seen_comment_ids": current.get("seen_comment_ids", []) + list(action.comment_ids)})
-        state_store.save(repo, pr, current, f"address {len(action.thread_ids)} thread(s) and {len(action.comment_ids)} comment(s)")
+                        "seen_comment_ids": (current.get("seen_comment_ids", [])
+                                             + list(action.comment_ids) + list(action.review_ids))})
+        state_store.save(repo, pr, current, f"address {len(action.thread_ids)} thread(s), {len(action.comment_ids)} comment(s) "
+                                            f"and {len(action.review_ids)} review(s)")
         notify(config, f"{repo} #{pr}", f"{count} piece(s) of feedback sent to the session")
-        say(f"PR #{pr}: {len(action.thread_ids)} thread(s) and {len(action.comment_ids)} comment(s) sent to window {window}")
+        say(f"PR #{pr}: {len(action.thread_ids)} thread(s), {len(action.comment_ids)} comment(s) and "
+            f"{len(action.review_ids)} review(s) sent to window {window}")
     elif isinstance(action, MarkDone):
         if dry_run:
             say(f"dry-run: would mark PR #{pr} done ({action.reason})")

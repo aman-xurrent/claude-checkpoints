@@ -17,8 +17,8 @@ def state(phase=2, status="waiting_approval", handoff_at="2026-09-07T10:00:00Z",
     return {"phase": phase, "status": status, "handoff_at": handoff_at, "consumed_approval_ids": list(consumed)}
 
 
-def approval(commit=HEAD, at="2026-09-07T11:00:00Z", author=ME, review_id="R1", review_state="APPROVED"):
-    return Review(review_id, author, review_state, at, commit)
+def approval(commit=HEAD, at="2026-09-07T11:00:00Z", author=ME, review_id="R1", review_state="APPROVED", body=""):
+    return Review(review_id, author, review_state, at, commit, body)
 
 
 def facts(reviews=(), threads=(), merged=False, closed=False, comments=(), head_at="2026-09-07T09:00:00Z"):
@@ -145,6 +145,58 @@ def resume_for(current, window_alive=False, worktree_exists=True, other_claude_r
     return decide_resume(current, window_alive=window_alive, worktree_exists=worktree_exists,
                          other_claude_running=other_claude_running, now=NOW,
                          seconds_since_start=seconds_since_start)
+
+
+class ReviewBodyTest(unittest.TestCase):
+    """GitHub files a review by the author of the pull request as COMMENTED, so the approval is the word
+    in the body. Those bodies are also where an objection that belongs to no line lives."""
+
+    def test_commented_review_saying_approved_starts_the_next_phase(self):
+        review = approval(review_state="COMMENTED", body="Approved")
+        self.assertEqual(decide(state(), facts(reviews=[review]), ME), StartPhase(3, "R1"))
+
+    def test_commented_review_with_a_note_is_feedback_not_an_approval(self):
+        review = approval(review_state="COMMENTED", body="Approved, but rename the field first")
+        action = decide(state(), facts(reviews=[review]), ME)
+        self.assertEqual(action, AddressComments((), (), "2026-09-07T11:00:00Z", ("R1",)))
+
+    def test_a_plain_review_body_is_feedback(self):
+        review = approval(review_state="COMMENTED", body="the presenter should take a keyword")
+        self.assertEqual(decide(state(), facts(reviews=[review]), ME).review_ids, ("R1",))
+
+    def test_changes_requested_body_is_feedback(self):
+        review = approval(review_state="CHANGES_REQUESTED", body="split this in two")
+        self.assertEqual(decide(state(), facts(reviews=[review]), ME).review_ids, ("R1",))
+
+    def test_changes_requested_never_approves_whatever_the_body_says(self):
+        review = approval(review_state="CHANGES_REQUESTED", body="Approved")
+        self.assertIsNone(decide(state(), facts(reviews=[review]), ME))
+
+    def test_a_review_on_an_older_commit_does_not_approve(self):
+        review = approval(commit=OLD, review_state="COMMENTED", body="Approved")
+        self.assertIsNone(decide(state(), facts(reviews=[review]), ME))
+
+    def test_a_review_before_the_handoff_is_ignored(self):
+        review = approval(at="2026-09-07T09:00:00Z", review_state="COMMENTED", body="Approved")
+        self.assertIsNone(decide(state(), facts(reviews=[review]), ME))
+
+    def test_a_seen_review_body_does_not_fire_twice(self):
+        review = approval(review_state="COMMENTED", body="the presenter should take a keyword")
+        current = state()
+        current["seen_comment_ids"] = ["R1"]
+        self.assertIsNone(decide(current, facts(reviews=[review]), ME))
+
+    def test_a_teammate_review_body_is_not_read_as_feedback_for_the_author(self):
+        review = approval(author="tushar", review_state="COMMENTED", body="please rename this")
+        self.assertIsNone(decide(state(), facts(reviews=[review]), ME))
+
+    def test_an_empty_review_body_is_nothing(self):
+        review = approval(review_state="COMMENTED", body="   ")
+        self.assertIsNone(decide(state(), facts(reviews=[review]), ME))
+
+    def test_a_ghmention_review_body_is_skipped(self):
+        review = approval(review_state="COMMENTED", body="@claude have a look at this")
+        self.assertIsNone(decide(state(), facts(reviews=[review]), ME))
 
 
 class DecideResumeTest(unittest.TestCase):

@@ -529,3 +529,30 @@ version saved.
 The description of PR 1027 also turned out to be whole again: it carries `## Request`, `## Discovery`,
 `## Plan by phase`, `## Phase 1`, `## Phase 2` and `## Phase 3`. The user had restored it. Decision 29's
 account of an unrecoverable loss is therefore about the mechanism, which was real, not about that content.
+
+## 31. An approval can be a review body
+
+The user approved phase 3 of PR 1027 and the loop did not move. The reason was in the store, not the
+words: the approval was review `15338`, state `COMMENTED`, body `Approved`, submitted on the head commit
+after the handoff. GitHub refuses the `APPROVED` state from the author of a pull request and files the
+review as `COMMENTED`, and the body of a review is neither an issue comment nor a review thread, so it
+appeared in none of the three places the daemon looked.
+
+`approving_review` now accepts a review whose body reads as an approval, in the `APPROVED` or `COMMENTED`
+state, under the same rules as before: by the user, on the current head, after the handoff, consumed once.
+A `CHANGES_REQUESTED` review never approves, whatever its body says.
+
+Review bodies are also feedback when they are not approvals. That is where an objection belonging to no
+single line lives, and it is stored nowhere else, so those were being dropped entirely. `AddressComments`
+carries `review_ids` beside its threads and comments, the brief renders the review body with its state,
+and the ids go into `seen_comment_ids` so each fires once.
+
+The query changed from `latestReviews` to `reviews(last:20)` with `body`, which also stops one review per
+author hiding an earlier one behind the latest.
+
+Eleven tests cover it: a `COMMENTED` body of `Approved` starts the next phase; `Approved, but rename the
+field first` is feedback; a plain body is feedback; `CHANGES_REQUESTED` is feedback and never approves; a
+body on an older commit or before the handoff does nothing; a seen body does not fire twice; a teammate's
+body is not the author's feedback; an empty body is nothing; a body carrying `@claude` is left to
+ghmention. Verified live: `decide` returned `StartPhase(4, ...)` for the real review, and the daemon
+started phase 4 in the pull request's window.

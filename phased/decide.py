@@ -32,6 +32,7 @@ class Review:
     state: str
     submitted_at: str
     commit_sha: str
+    body: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,11 @@ class Facts:
 
 
 APPROVAL_WORD = "approved"
+# A review submitted by the author of the pull request cannot carry the APPROVED state: GitHub refuses it
+# and files the review as COMMENTED. The word in the body is the approval, exactly as it is in a
+# conversation comment. A review that asks for changes never approves, whatever its body says.
+APPROVING_REVIEW_STATES = ("APPROVED", "COMMENTED")
+FEEDBACK_REVIEW_STATES = ("COMMENTED", "CHANGES_REQUESTED")
 # A comment carrying this marker belongs to the other daemon (ghmention). Reading it as feedback would
 # make the two answer each other.
 MENTION_MARKER = "@claude"
@@ -80,6 +86,7 @@ class AddressComments:
     thread_ids: tuple
     comment_ids: tuple
     newest_comment_at: str
+    review_ids: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -103,11 +110,16 @@ def blocking_threads(facts):
 
 
 def approving_review(state, facts, me):
-    """The user's APPROVED review given on the current head, after the last handoff, not consumed yet."""
+    """The user's approving review on the current head, after the last handoff, not consumed yet.
+
+    Either an APPROVED review, or a review whose body is the word `Approved`, which is what a review by
+    the author of the pull request becomes."""
     handoff_at = parse_time(state["handoff_at"])
     consumed = set(state.get("consumed_approval_ids", []))
     for review in facts.reviews:
-        if review.author != me or review.state != "APPROVED" or review.id in consumed:
+        if review.author != me or review.id in consumed or review.state not in APPROVING_REVIEW_STATES:
+            continue
+        if review.state != "APPROVED" and not is_approval_text(review.body):
             continue
         if review.commit_sha != facts.head_sha:
             continue
@@ -152,6 +164,17 @@ def feedback_comments(state, facts, me):
             and parse_time(comment.created_at) > handoff_at]
 
 
+def feedback_reviews(state, facts, me):
+    """A review body is where an objection that belongs to no single line lives, and it is stored nowhere
+    else. Reading only the conversation tab and the line threads left those unanswered."""
+    handoff_at = parse_time(state["handoff_at"])
+    spent = set(state.get("consumed_approval_ids", [])) | set(state.get("seen_comment_ids", []))
+    return [review for review in facts.reviews
+            if review.author == me and review.id not in spent and review.state in FEEDBACK_REVIEW_STATES
+            and review.body.strip() and not is_approval_text(review.body) and MENTION_MARKER not in review.body
+            and parse_time(review.submitted_at) > handoff_at]
+
+
 def decide(state, facts, me) -> Optional[object]:
     if state["status"] == STATUS_DONE:
         return None
@@ -163,9 +186,14 @@ def decide(state, facts, me) -> Optional[object]:
     new_threads = [thread for thread in blocking_threads(facts)
                    if parse_time(thread.last_comment_at) > handoff_at and thread.last_comment_author != "phased"]
     new_comments = feedback_comments(state, facts, me)
-    if new_threads or new_comments:
-        newest = max([thread.last_comment_at for thread in new_threads] + [comment.created_at for comment in new_comments])
-        return AddressComments(tuple(thread.id for thread in new_threads), tuple(comment.id for comment in new_comments), newest)
+    new_reviews = feedback_reviews(state, facts, me)
+    if new_threads or new_comments or new_reviews:
+        newest = max([thread.last_comment_at for thread in new_threads]
+                     + [comment.created_at for comment in new_comments]
+                     + [review.submitted_at for review in new_reviews])
+        return AddressComments(tuple(thread.id for thread in new_threads),
+                               tuple(comment.id for comment in new_comments), newest,
+                               tuple(review.id for review in new_reviews))
     if blocking_threads(facts):
         return None
     approval = approving_review(state, facts, me) or approving_comment(state, facts, me)

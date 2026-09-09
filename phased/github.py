@@ -9,7 +9,7 @@ from decide import Comment, Facts, Review, Thread
 PULL_REQUEST_FIELDS = """
   number url title isDraft closed merged headRefName
   commits(last:1){ nodes{ commit{ oid committedDate } } }
-  latestReviews(first:20){ nodes{ id author{login} state submittedAt commit{ oid } } }
+  reviews(last:20){ nodes{ id author{login} state submittedAt body commit{ oid } } }
   reviewThreads(first:100){ nodes{ id isResolved isOutdated
     comments(last:20){ nodes{ author{login} body path line createdAt url } } } }
   comments(last:30){ nodes{ id author{login} body createdAt } }
@@ -46,7 +46,8 @@ def fetch(gh_host, repo, numbers):
 def facts_from(raw):
     commit = raw["commits"]["nodes"][0]["commit"] if raw["commits"]["nodes"] else {"oid": "", "committedDate": ""}
     reviews = tuple(Review(node["id"], (node.get("author") or {}).get("login", ""), node["state"], node["submittedAt"],
-                           (node.get("commit") or {}).get("oid", "")) for node in raw["latestReviews"]["nodes"])
+                           (node.get("commit") or {}).get("oid", ""), node.get("body") or "")
+                    for node in raw["reviews"]["nodes"])
     threads = []
     for node in raw["reviewThreads"]["nodes"]:
         comments = node["comments"]["nodes"]
