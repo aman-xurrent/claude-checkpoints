@@ -34,19 +34,24 @@ branch name `requests/<id>-*`, `<n>` the PR number.
      `GH_HOST=git.4me.com gh pr create --draft --title "Request#<id> <subject>" --body-file <file>`.
      Then set the request's `review` custom field to the PR URL
      (`.claude/bin/xurrent-api PATCH /requests/<id> '{"custom_fields":[{"id":"review","value":"<url>"}]}'`).
-   - Every phase appends a `## Phase N` section to the description: the done criteria as a ticked checklist,
-     what the phase changed in three lines, and the phase's own notes (phase 1 discovery, phase 5 audit).
-     Append it to the body that is there now. Never compose the body from memory:
+   - Every phase writes its `## Phase N` section with `.claude/bin/pr-phase`, which reads the live
+     description and splices in that one section, leaving everything else byte for byte:
 
      ```
-     GH_HOST=git.4me.com gh pr view <n> --json body --jq .body > body.md   # read what is there
-     # append your `## Phase N` section to body.md, changing nothing above it
-     GH_HOST=git.4me.com gh pr edit <n> --body-file body.md
+     .claude/bin/pr-phase --pr <n> --phase N --body-file <file>     # --dry-run shows the change first
      ```
 
-     Reading first is not optional. A body written from memory deletes the earlier phases and every edit
-     the user made, and that deletion is silent. `phased handoff` refuses a phase whose section is missing
-     from the description, and refuses one whose description lost a section it had at the last handoff.
+     The file holds the section content only: the done criteria as a ticked checklist, what the phase
+     changed in three lines, and the phase's own notes (phase 1 discovery, phase 5 audit). Leave the
+     `## Phase N` heading out, the script writes it. The section is appended when it is new and replaced
+     in place when the phase comes back to it after review, so it never appears twice.
+
+     Never write a whole body with `gh pr edit --body-file`: that rebuilds the record from memory and
+     deletes every section you did not retype, the user's own edits included, and GitHub keeps no
+     revision history to restore them from. The guard refuses those calls. `pr-phase` keeps the previous
+     description under `~/.local/state/phased/<owner>__<repo>/pr-<n>/descriptions/` before every write.
+     `phased handoff` refuses a phase whose section is missing from the description, and refuses one
+     whose description lost a section it had at the last handoff.
      The PR description is the record of the work. Nothing about the phases is written into the repository.
 5. Xurrent, one PATCH: `source .claude/bin/xurrent-constants`, then
    `.claude/bin/xurrent-api PATCH "/requests/<id>" '{"member_id": <my person id>, "agile_board_column_id": <review column>}'`

@@ -92,6 +92,25 @@ decisions hold in every permission mode, auto included.
 | `docs/plan.md`, `docs/decisions.md`, `docs/tool-verdicts.md` | The plan, every decision with its reason and retractions, and the review of ten code-search tools. |
 | `docs/diagrams/` | Two Excalidraw diagrams of the flakes the gate found. |
 
+## Writing the pull request description
+
+`ipaas-skills/pr-phase` is the only way a session changes the description:
+
+```
+.claude/bin/pr-phase --pr N --phase P --body-file <file>   # --dry-run shows the change first
+```
+
+It reads the live description, splices in that one `## Phase P` section and leaves everything else byte
+for byte. The section is appended when it is new and replaced in place when the phase comes back to it
+after review, so it never appears twice. The file carries the section content only; the script writes the
+heading, so it always has the form the handoff check looks for. Before every write it saves the previous
+description under `~/.local/state/phased/<owner>__<repo>/pr-<n>/descriptions/`, because GitHub keeps no
+revision history for a pull request body. It refuses to write at all if the result would drop a section.
+
+The guard denies `gh pr edit --body-file`, `gh pr edit --body` and a PATCH of the body through the API
+unless the command goes through the wrapper. `gh pr create --body-file` stays allowed: that is phase 1
+opening the pull request. Reading the body, and editing labels or the title, stay allowed.
+
 ## Two runners, one proof
 
 The proof picks its runner from the declared test file. A test under `platform/app/javascript/` with a JS

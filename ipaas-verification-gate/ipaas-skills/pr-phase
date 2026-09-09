@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Put one phase section into a pull request description without touching the rest of it.
+
+Every phase used to write the whole body, so the record was rebuilt from memory each time and whatever
+a session did not retype disappeared, the user's own edits included. This reads the live description,
+splices in one `## Phase N` section, and writes it back. Everything above and below that section is
+kept byte for byte.
+
+The section is appended when the description has no `## Phase N` heading yet, and replaced in place when
+it has one, so a phase that comes back to address review comments updates its own section instead of
+adding a second copy.
+
+Usage:
+  .claude/bin/pr-phase --pr N --phase P --body-file <path>   (`-` reads standard input)
+  .claude/bin/pr-phase --pr N --phase P --body-file - --dry-run
+
+The file holds the section content only, without the `## Phase N` heading: the heading is written here,
+so it always has the form the handoff check looks for.
+
+Options:
+  --pr N          pull request number. Read from the current branch when omitted.
+  --phase P       the phase whose section this is. Required.
+  --body-file F   the section content, or `-` for standard input. Required.
+  --dry-run       print what would change and write nothing.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+GH_HOST = os.environ.get("GH_HOST", "git.4me.com")
+STATE_ROOT = Path(os.environ.get("PHASED_STATE_DIR", Path.home() / ".local/state/phased"))
+HEADING = re.compile(r"^##\s+(.*)$", re.MULTILINE)
+LAST_PHASE = 7
+
+
+def gh(*arguments, check=True):
+    completed = subprocess.run(["gh", *arguments], capture_output=True, text=True,
+                               env={**os.environ, "GH_HOST": GH_HOST}, stdin=subprocess.DEVNULL)
+    if check and completed.returncode != 0:
+        raise SystemExit(f"pr-phase: gh {' '.join(arguments[:3])} failed: {completed.stderr.strip()[:300]}")
+    return completed.stdout
+
+
+def repository():
+    remote = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    match = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", remote)
+    if not match:
+        raise SystemExit(f"pr-phase: cannot read owner/name from the remote {remote!r}")
+    return match.group(1)
+
+
+def pull_request_number():
+    number = gh("pr", "view", "--json", "number", "--jq", ".number", check=False).strip()
+    if not number.isdigit():
+        raise SystemExit("pr-phase: no pull request for this branch; pass --pr N")
+    return int(number)
+
+
+def headings(body):
+    return [match.group(1).strip() for match in HEADING.finditer(body or "")]
+
+
+def splice(body, phase, section):
+    """The description with this phase's section put in place. Returns the body and what was done."""
+    body = (body or "").rstrip("\n")
+    block = f"## Phase {phase}\n\n{section.strip()}"
+    pattern = re.compile(rf"^##\s+Phase\s+{phase}\b.*?(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+    if pattern.search(body):
+        return pattern.sub(lambda _: block + "\n\n", body).rstrip("\n") + "\n", "replaced"
+    return f"{body}\n\n{block}\n", "appended"
+
+
+def backup(repo, number, body):
+    """Keep the description as it was before the write. GitHub exposes no revision history for a body,
+    so without this a bad write is unrecoverable."""
+    directory = STATE_ROOT / repo.replace("/", "__") / f"pr-{number}" / "descriptions"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.md"
+    path.write_text(body or "")
+    return path
+
+
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--pr", type=int)
+    parser.add_argument("--phase", type=int, required=True)
+    parser.add_argument("--body-file", required=True)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.help:
+        print(__doc__)
+        return
+    if arguments.phase not in range(1, LAST_PHASE + 1):
+        raise SystemExit(f"pr-phase: --phase must be 1 to {LAST_PHASE}")
+    section = sys.stdin.read() if arguments.body_file == "-" else Path(arguments.body_file).read_text()
+    if not section.strip():
+        raise SystemExit("pr-phase: the section is empty")
+    if re.match(r"^\s*##\s+Phase\s+\d", section):
+        raise SystemExit("pr-phase: leave the `## Phase N` heading out of the file; this script writes it")
+
+    repo = repository()
+    number = arguments.pr or pull_request_number()
+    before = gh("api", f"/repos/{repo}/pulls/{number}", "--jq", ".body")
+    after, action = splice(before, arguments.phase, section)
+
+    kept = [each for each in headings(before) if each != f"Phase {arguments.phase}"]
+    lost = [each for each in kept if each not in headings(after)]
+    if lost:
+        raise SystemExit(f"pr-phase: refusing to write, this would drop the section(s): {', '.join(lost)}")
+
+    print(f"pr-phase: {repo} #{number}, phase {arguments.phase} {action}")
+    print(f"  sections before: {' | '.join(headings(before)) or '(none)'}")
+    print(f"  sections after : {' | '.join(headings(after))}")
+    print(f"  description {len(before or '')} -> {len(after)} characters")
+    if arguments.dry_run:
+        print("  dry run, nothing written")
+        return
+    saved = backup(repo, number, before)
+    target = saved.parent / "next.md"
+    target.write_text(after)
+    gh("pr", "edit", str(number), "--repo", repo, "--body-file", str(target))
+    target.unlink(missing_ok=True)
+    print(f"  written. the previous description is kept at {saved}")
+
+
+if __name__ == "__main__":
+    main()

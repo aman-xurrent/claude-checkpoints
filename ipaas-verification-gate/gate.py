@@ -79,12 +79,12 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment")
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
-                         "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment",
+                         "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -235,12 +235,21 @@ GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once
 GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", "personal/scripts/gate", "personal/scripts/phased",
                          ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
-                          ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", "phased handoff", "phased status",
-                          "phased logs", "phased adopt")
+                          ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
+                          "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
 # reader cannot tell it from a comment the account holder typed.
 COMMENT_WRAPPER = ".claude/bin/pr-comment"
+# The description is the record of the work, and a phase that writes the whole body rebuilds that record
+# from memory: every section it does not retype is deleted, silently, including the user's own edits.
+# `.claude/bin/pr-phase` reads the live description and splices in one phase section, so nothing else can
+# be lost. Creating the pull request still writes a whole body, which is phase 1 and is allowed.
+DESCRIPTION_WRAPPER = ".claude/bin/pr-phase"
+GUARD_DESCRIPTION_WRITING = (
+    re.compile(r"\bgh\s+pr\s+edit\b[^|;]*--body(-file)?\b"),
+    re.compile(r"\bgh\s+api\b[^|;]*\bpulls/\d+\b[^|;]*(-X\s*(PATCH|POST)|--method\s*(PATCH|POST))[^|;]*\bbody\b"),
+)
 GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+pr\s+comment\b"),
     re.compile(r"\bgh\s+pr\s+review\b"),
@@ -1573,6 +1582,11 @@ def guard_segment(segment):
         return ("a pull request comment must go through `.claude/bin/pr-comment --pr N --title \"...\" --body-file <path>`, "
                 "which stamps who posted it and folds the content into a collapsed block. A raw post is indistinguishable "
                 "from one the account holder wrote.")
+    if DESCRIPTION_WRAPPER not in segment and any(pattern.search(segment) for pattern in GUARD_DESCRIPTION_WRITING):
+        return ("the pull request description must be changed through "
+                "`.claude/bin/pr-phase --pr N --phase P --body-file <path>`, which reads the live description and "
+                "splices in that one phase section. Writing a whole body deletes every section you did not retype, "
+                "including the user's own edits, and GitHub keeps no revision history to restore them from.")
     touched = [path for path in GUARD_WRITE_PROTECTED if path in segment]
     if not touched:
         return None

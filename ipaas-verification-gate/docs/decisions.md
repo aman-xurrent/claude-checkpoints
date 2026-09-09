@@ -501,3 +501,31 @@ section says the push "needed a one-shot skip" and that "the user cleared it wit
 `~/.local/state/gate/skips.log` holds exactly one entry, a dry run from 2026-09-07, and that push landed
 after the `pushed_revisions` fix that removed the refusal. No skip was granted. That paragraph credits a
 skip for work the fix unblocked.
+
+## 30. One phase section at a time
+
+Decision 29 told sessions to read the description before writing it and made `phased handoff` refuse a
+record that fell behind. Both leave the splice to the model, and the model is what deleted phase 1 in the
+first place. `ipaas-skills/pr-phase` does the splice mechanically instead.
+
+It reads the live description, replaces the `## Phase N` block when it exists and appends it when it does
+not, and keeps everything else byte for byte. The section content comes in a file without its heading, so
+the heading always has the form the handoff check looks for. Before each write it saves the previous
+description under `~/.local/state/phased/<owner>__<repo>/pr-<n>/descriptions/`, which is the recovery that
+did not exist when phase 1 was lost. It refuses to write if the result would drop any section it did not
+own.
+
+The guard now denies `gh pr edit --body`, `gh pr edit --body-file`, and a body PATCH through the API,
+unless the command goes through the wrapper, the same way comments go through `pr-comment`.
+`gh pr create --body-file` stays allowed, because that is phase 1 opening the pull request; reading the
+body, labels and the title stay allowed.
+
+Verified on the live PR 1027: five splice cases pass (append, replace, replace a middle section, an empty
+description, a phase re-run after review); a dry run against the real description shows exactly one added
+section; and a full round trip, feeding phase 3's own content back through the tool, changed the live
+description by one trailing blank line and nothing else, with every other section intact and the previous
+version saved.
+
+The description of PR 1027 also turned out to be whole again: it carries `## Request`, `## Discovery`,
+`## Plan by phase`, `## Phase 1`, `## Phase 2` and `## Phase 3`. The user had restored it. Decision 29's
+account of an unrecoverable loss is therefore about the mechanism, which was real, not about that content.
