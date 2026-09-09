@@ -17,6 +17,12 @@ def tmux(*arguments, check=True):
     return completed.stdout.strip()
 
 
+def server_running():
+    """A tmux server with at least one session. After a restart the daemon starts long before the user
+    opens a terminal, and a restart that creates the server would race tmux-continuum's restore."""
+    return subprocess.run(["tmux", "list-sessions"], capture_output=True).returncode == 0
+
+
 def has_session(session):
     return subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode == 0
 
@@ -67,6 +73,25 @@ def claude_running_in(directory):
         if pane_directory == directory or directory in pane_directory.parents:
             return window_id
     return None
+
+
+def find_window(session, name):
+    """Any window of that name, whatever runs in it. tmux-resurrect brings a window back with its name,
+    layout and working directory but with a plain shell in it, and that window is the one to reuse."""
+    if not has_session(session):
+        return None
+    for line in tmux("list-windows", "-t", session, "-F", "#{window_id} #{window_name}", check=False).splitlines():
+        window_id, _, window_name = line.partition(" ")
+        if window_name == name:
+            return window_id
+    return None
+
+
+def respawn_window(window_id, cwd, launcher):
+    """Replace what runs in an existing window instead of opening a second window of the same name."""
+    tmux("respawn-pane", "-k", "-t", window_id, "-c", cwd,
+         f"{os.environ.get('SHELL', '/bin/zsh')} -lc {shell_quote(launcher)}")
+    return window_id
 
 
 def send_line(window_id, line):

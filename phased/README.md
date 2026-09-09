@@ -28,6 +28,44 @@ consumed approval ids, the window id, the worktree. Writes are temp file plus re
 never read back. The state also carries `claude_session_id`, the id the session was launched with, so a
 lost session can be reopened with its conversation.
 
+## tmux persistence, and who owns Claude
+
+tmux-resurrect and tmux-continuum keep the terminal side across a restart: sessions, windows, their
+names, the layout and the working directory of every pane. They restore the shape. They must never
+restore Claude.
+
+A restored `claude` is a fresh process with no conversation and no brief. The daemon reads that window as
+a healthy session and leaves the pull request alone, which is worse than an empty window. So `claude`
+stays out of `@resurrect-processes`, and the daemon reopens the session itself with `claude --resume`.
+Verified on this machine: a restore brought back every window, including `pr1027` with its worktree, and
+every Claude pane came back as a plain shell.
+
+Two rules in the daemon follow from that split.
+
+A restart only joins a tmux server that already runs. It never creates one. After a reboot the daemon
+starts long before the user opens a terminal, and creating the server there would fire continuum's
+restore against a server the daemon made, whose next auto-save would overwrite the good save. Waiting
+also means a session restarts when the user is at the machine.
+
+A restart reuses the window resurrect brought back. `find_window` matches the name whatever runs inside,
+and `respawn-pane -k` puts Claude into that window, so the loop never leaves two windows called `pr1027`.
+
+The tmux side lives in `~/.tmux.conf`, which is in neither repository:
+
+```tmux
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @resurrect-processes 'vi vim view nvim emacs man less more tail top htop lazygit'
+set -g @resurrect-capture-pane-contents 'on'
+set -g @resurrect-hook-post-save-all '~/.local/bin/tmux-resurrect-prune'
+set -g @continuum-save-interval '5'
+set -g @continuum-restore 'on'
+```
+
+`tmux-resurrect-prune` (in this directory, installed to `~/.local/bin`) keeps the last 120 saves, because
+resurrect never deletes one and continuum writes a save every five minutes. Saves land in
+`~/.local/share/tmux/resurrect` unless `~/.tmux/resurrect` exists.
+
 ## When a session is lost
 
 A machine restart kills every tmux window, and a pull request in `working` or `addressing_comments` is

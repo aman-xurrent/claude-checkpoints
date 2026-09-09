@@ -111,6 +111,24 @@ Tracing never gates: `record_trace` swallows every exception, and standard input
 hook subcommands, so a shell command can never block on it. The directory is inside the fence, so a
 session can read its own record and cannot edit it.
 
+## After a restart
+
+A restart kills a running prover and any session holding the checks worktree, and both leave a marker
+that says "busy" behind them. Two rules tell a marker that is still owned from one that outlived its
+owner.
+
+A proof run records the prover's process id and the machine's boot time. A run still `pending` whose
+boot time differs from the current one, or whose process is gone, is settled as `interrupted` the first
+time `stop` or `surface` looks at it, with the reason written into its findings. Before this, such a run
+said "proof is still running. Do not report the change as done" for ever. A run left pending by an older
+version of the gate carries no process id and is settled on the boot time alone.
+
+The checks worktree marker can use only the boot time: the worktree is held across several gate calls,
+each a short process of its own, so no process id lives as long as the hold. A marker written before the
+last boot is taken over by the next `checks apply`, which reports the takeover as a step and carries the
+old marker's `migrations` flag forward, because that flag is the only record that the test database was
+migrated for a branch. `checks status` names a marker that outlived its restart.
+
 ## Setup on a new machine
 
 Prerequisites: a working ipaas development environment (specs pass in the main worktree and

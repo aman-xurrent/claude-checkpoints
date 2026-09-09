@@ -1,0 +1,18 @@
+#!/bin/sh
+# Continuum saves every few minutes and resurrect never deletes an old save, so the directory grows
+# without a limit. Keep the recent ones and delete the rest. Run from resurrect's post-save hook.
+# The save directory follows resurrect's own rule: ~/.tmux/resurrect when that directory exists,
+# otherwise the XDG data path.
+KEEP=120
+if [ -n "${1:-}" ]; then
+  DIRECTORY="$1"
+elif [ -d "$HOME/.tmux/resurrect" ]; then
+  DIRECTORY="$HOME/.tmux/resurrect"
+else
+  DIRECTORY="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+fi
+[ -d "$DIRECTORY" ] || exit 0
+ls -t "$DIRECTORY"/tmux_resurrect_*.txt 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r stale; do
+  rm -f "$stale"
+done
+exit 0

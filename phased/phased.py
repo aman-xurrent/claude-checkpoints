@@ -233,15 +233,22 @@ def write_launcher(current, worktree, prompt, claude_flags):
 
 
 def open_window(config, current, prompt, claude_flags):
-    """A new tmux window running claude with the brief. Returns the window id."""
+    """A tmux window running claude with the brief. An existing window of the same name is reused, so a
+    window tmux-resurrect brought back gets the session instead of a second window beside it."""
     session = session_name(config, current)
+    name = f"pr{current['pr']}"
     worktree = Path(current["worktree"])
     if not worktree.is_dir():
         raise RuntimeError(f"worktree {worktree} is gone; run phased adopt --pr {current['pr']} --phase {current['phase']} --worktree <path>")
-    tmux.ensure_session(session, str(worktree))
     launcher = write_launcher(current, worktree, prompt, claude_flags)
-    window = tmux.new_window(session, f"pr{current['pr']}", str(worktree), str(launcher))
-    log(f"opened window {window} ({session}:pr{current['pr']}) with `claude {' '.join(claude_flags)}` for PR #{current['pr']}")
+    existing = tmux.find_window(session, name)
+    if existing:
+        tmux.respawn_window(existing, str(worktree), str(launcher))
+        log(f"reused window {existing} ({session}:{name}) with `claude {' '.join(claude_flags)}` for PR #{current['pr']}")
+        return existing
+    tmux.ensure_session(session, str(worktree))
+    window = tmux.new_window(session, name, str(worktree), str(launcher))
+    log(f"opened window {window} ({session}:{name}) with `claude {' '.join(claude_flags)}` for PR #{current['pr']}")
     return window
 
 
@@ -300,6 +307,12 @@ def check_stranded(config, dry_run=False):
     """A pull request whose session is gone. This runs before GitHub is polled and does not depend on it:
     a stranded pull request in status working is invisible to `decide`, which only reads a pull request
     that waits for approval."""
+    if not tmux.server_running():
+        # No terminal is open yet. Creating the server here would fire tmux-continuum's restore against a
+        # server the daemon made, and continuum's next auto-save would write that bare state over the good
+        # one. The restart waits for the user's own tmux, which is also when the user is at the machine.
+        log("no tmux server yet; nothing is restarted")
+        return set()
     restarted = set()
     for current in state_store.all_states():
         if current.get("status") == STATUS_DONE:

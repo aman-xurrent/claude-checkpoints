@@ -404,3 +404,31 @@ cannot block on a pipe that stays open.
 `--session ID`, `--command NAME`, `--failures`, `--day`, `--last N`, and `--full` for the whole payload and
 answer. The directory sits under `~/.local/state/gate/`, which the fence already denies writing to, so the
 model can read its own record and cannot edit it.
+
+## 27. tmux keeps the shape, phased keeps the conversation
+
+tmux-resurrect and tmux-continuum now persist the terminal side: every session, window, window name,
+layout and working directory, saved every five minutes and restored when the tmux server starts.
+
+The one rule that matters is what they must not restore. `claude` is deliberately absent from
+`@resurrect-processes`. A restored Claude is a fresh process with no conversation and no brief, and the
+phased daemon would read that window as a healthy session and leave the pull request alone, which is
+worse than an empty window. Restoring the shape is resurrect's job; restoring the conversation is the
+daemon's, through `claude --resume <id>`. Verified: a restore brought back every window, including
+`pr1027` with its worktree, and every Claude pane came back as a plain shell.
+
+Two daemon rules follow. A restart only joins a tmux server that already runs, never creates one: after a
+reboot the daemon starts long before the user opens a terminal, and creating the server there would fire
+continuum's restore against a server the daemon made, whose next auto-save would then overwrite the good
+save. And a restart reuses the window resurrect brought back (`respawn-pane -k` into the window of that
+name) instead of opening a second window called `pr1027`.
+
+The gate side of a restart is the marker that outlives its owner. A prover killed mid-run left its findings
+`pending` for ever, so every reader kept saying the proof was still running; a session holding the checks
+worktree left a marker that refused every other branch until someone reset it by hand. Both are settled by
+the boot time, with the process id added for a prover killed without a restart. The checks marker cannot
+use a process id at all, because the worktree is held across several short gate calls.
+
+The tmux configuration lives in `~/.tmux.conf`, outside both repositories, so the ownership rule is
+written down here and in `phased/README.md`. `phased/tmux-resurrect-prune` keeps the last 120 saves,
+because resurrect never deletes one.

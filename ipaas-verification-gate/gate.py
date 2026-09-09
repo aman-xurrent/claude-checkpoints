@@ -260,12 +260,14 @@ STATUS_AMBIGUOUS = "ambiguous_declaration"
 STATUS_FLAKY = "flaky"
 STATUS_NOT_APPLICABLE = "not_applicable"
 STATUS_DEFERRED = "deferred_system_tier"
+STATUS_INTERRUPTED = "interrupted"
 STATUS_ERROR = "error"
 STATUS_SEVERITY = (
     STATUS_PASS,
     STATUS_NOT_APPLICABLE,
     STATUS_DEFERRED,
     STATUS_PENDING,
+    STATUS_INTERRUPTED,
     STATUS_FLAKY,
     STATUS_AMBIGUOUS,
     STATUS_FAILS_WITH_CHANGE,
@@ -275,6 +277,59 @@ STATUS_SEVERITY = (
 
 
 # ---------------------------------------------------------------- helpers
+# A restart kills a running prover and a session holding the checks worktree, and both leave a marker
+# that says "busy" behind them. The pair below tells a marker that is still owned from one that outlived
+# its owner. The boot time settles a restart on its own: a process cannot have started before the boot
+# it is supposedly running in. The process check catches a prover killed without a restart. Both are
+# needed, because a process id is reused after a boot.
+
+def boot_time():
+    """Seconds since the epoch at which this machine booted, or 0 when it cannot be read."""
+    try:
+        output = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout
+    except OSError:
+        return 0
+    match = re.search(r"sec\s*=\s*(\d+)", output)
+    return int(match.group(1)) if match else 0
+
+
+def process_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def started_before_this_boot(started_at):
+    boot = boot_time()
+    if not boot or not started_at:
+        return False
+    try:
+        return datetime.strptime(started_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() < boot
+    except ValueError:
+        return False
+
+
+def survived_a_restart(record):
+    """The record was written before this boot, so whatever wrote it is gone. This is the only test the
+    checks marker can use: the worktree is held across several gate calls, each a short process of its
+    own, so no process id stays alive for the length of the hold."""
+    if record.get("boot"):
+        return record["boot"] != boot_time()
+    return started_before_this_boot(record.get("at") or record.get("started_at"))
+
+
+def owner_is_gone(record):
+    """True when the process that wrote this record cannot still be running."""
+    if started_before_this_boot(record.get("started_at") or record.get("at")):
+        return True
+    if record.get("boot") and record["boot"] != boot_time():
+        return True
+    if record.get("pid") is None:
+        return False  # written before this check existed, and on this boot: assume it is alive
+    return not process_alive(record["pid"])
+
 
 def now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -736,7 +791,8 @@ def prove(run_directory):
     patch = (run_directory / PATCH_FILE_NAME).read_text()
     spec_patch, code_patch, _ = split_patch(patch)
     findings = {"id": meta.get("id"), "status": STATUS_PENDING, "base_sha": meta.get("base_sha"),
-                "patch_sha": meta.get("patch_sha"), "started_at": now_iso(), "proofs": []}
+                "patch_sha": meta.get("patch_sha"), "started_at": now_iso(), "proofs": [],
+                "pid": os.getpid(), "boot": boot_time()}
     write_json(run_directory / FINDINGS_FILE_NAME, findings)
 
     GATE_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -766,6 +822,8 @@ def stop():
     if payload.get("stop_hook_active"):
         return
     root = repository_root(payload.get("cwd") or os.getcwd())
+    if root is not None:
+        settle_interrupted_runs(root)
     if root is None or not (root / "platform").is_dir():
         return
     message = stop_message(root)
@@ -806,6 +864,23 @@ def stop_message(root):
     return "\n".join(messages) if messages else None
 
 
+def settle_interrupted_runs(root):
+    """A prover killed by a restart leaves its run `pending` for ever, and every reader then says the
+    proof is still running. Give such a run a terminal status the first time anyone looks."""
+    settled = []
+    for run_directory in sorted_runs(root):
+        findings = read_json(run_directory / FINDINGS_FILE_NAME) or {}
+        if findings.get("status") != STATUS_PENDING or not owner_is_gone(findings):
+            continue
+        findings["status"] = STATUS_INTERRUPTED
+        findings["reason"] = ("the prover did not finish: the machine restarted or the process was killed. "
+                              "Nothing was proven. Declare again to re-prove.")
+        findings["finished_at"] = now_iso()
+        write_json(run_directory / FINDINGS_FILE_NAME, findings)
+        settled.append(run_directory.name)
+    return settled
+
+
 # --------------------------------------------------------------- surface
 
 def surface():
@@ -813,6 +888,7 @@ def surface():
     root = repository_root(payload.get("cwd") or os.getcwd())
     if root is None:
         return
+    settle_interrupted_runs(root)
     marker_path = proof_directory(root) / SURFACED_MARKER_NAME
     surfaced = set((read_json(marker_path, default=[]) or []))
     lines = []
@@ -1658,8 +1734,11 @@ def apply_branch_to_checks(root):
     """Put the checks worktree into the exact state of root: its HEAD commit plus its working tree."""
     in_use = read_json(checks_in_use_path()) or {}
     branch = current_branch(root)
+    taken_over = None
     if in_use and in_use.get("branch") != branch:
-        raise RuntimeError(f"the checks worktree is in use by {in_use.get('branch')} since {in_use.get('at')}; finish there, then gate.py checks reset")
+        if not survived_a_restart(in_use):
+            raise RuntimeError(f"the checks worktree is in use by {in_use.get('branch')} since {in_use.get('at')}; finish there, then gate.py checks reset")
+        taken_over = in_use.get("branch")
     head = git(root, "rev-parse", "HEAD").stdout.strip()
     git(CHECKS_WORKTREE, "checkout", "--detach", "--force", "--quiet", head)
     git(CHECKS_WORKTREE, "reset", "--hard", "--quiet")
@@ -1669,10 +1748,15 @@ def apply_branch_to_checks(root):
     patch = snapshot_patch(root, "HEAD")
     if patch.strip():
         git(CHECKS_WORKTREE, "apply", "--whitespace=nowarn", "-", input_text=patch)
+    # The marker carries `migrations` forward on purpose: it is the only record that the test database was
+    # migrated for a branch, and dropping it leaves the worktree migrated for a branch nobody checks now.
     migrations = migrations_in(root, diff_base(root)) or bool(in_use.get("migrations"))
     write_json(checks_in_use_path(), {"branch": branch, "source_root": str(root), "head": head,
-                                      "patch_sha": patch_digest(patch), "migrations": migrations, "at": now_iso()})
+                                      "patch_sha": patch_digest(patch), "migrations": migrations,
+                                      "at": now_iso(), "boot": boot_time()})
     steps = [("apply", "ok", f"{branch} at {head[:10]} plus {len(patch.splitlines())} patch line(s) in {CHECKS_WORKTREE}")]
+    if taken_over:
+        steps.insert(0, ("takeover", "ok", f"{taken_over} left the checks worktree at the restart; taking it over"))
     platform = CHECKS_WORKTREE / "platform"
     if migrations:
         steps.append(command_check("db:test:prepare", ["bundle", "exec", "rake", "db:test:prepare"], platform, environment=checks_test_environment()))
@@ -1737,7 +1821,13 @@ def checks(arguments):
         dirty = git(CHECKS_WORKTREE, "status", "--porcelain").stdout.strip()
         values = environment_file_values(CHECKS_WORKTREE / WORKTREE_ENVIRONMENT_FILE)
         print(f"{CHECKS_WORKTREE}: HEAD {head}, {'dirty' if dirty else 'clean'}, slot {values.get('IPAAS_WT_SLOT')}, web port {values.get('WEB_PORT')}")
-        print(f"in use by {in_use['branch']} since {in_use['at']}" if in_use else "free")
+        if not in_use:
+            print("free")
+        elif survived_a_restart(in_use):
+            print(f"marked in use by {in_use['branch']} since {in_use['at']}, but that was before the last restart; "
+                  "the next apply takes it over")
+        else:
+            print(f"in use by {in_use['branch']} since {in_use['at']}")
         return
     with checks_lock():
         if arguments[0] == "apply":
