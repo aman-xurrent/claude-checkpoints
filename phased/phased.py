@@ -51,6 +51,7 @@ DEFAULT_CONFIG = {
     "repos": {"4me/ipaas": {"tmux": "ipaas", "path": str(Path.home() / "work/ipaas")}},
 }
 SKILLS_DIRECTORY = ".claude/skills"
+PHASE_SECTION = re.compile(r"^##\s*Phase\s+(\d+)\b", re.MULTILINE)
 TRANSCRIPT_ROOT = Path.home() / ".claude/projects"
 STARTED_AT = time.monotonic()
 
@@ -463,6 +464,36 @@ def argument_value(arguments, flag, default=None):
     return default
 
 
+def phase_sections_in(description):
+    return sorted({int(match.group(1)) for match in PHASE_SECTION.finditer(description or "")})
+
+
+def description_violations(config, repo, pr, phase, recorded):
+    """What is wrong with the description, and the phase sections it holds.
+
+    The description must carry this phase's section, and must still carry the sections it carried at the
+    last handoff. Every phase rewrites the whole body, so a phase that composes it from memory instead of
+    reading the current one silently deletes an earlier phase, and the user's own edits with it."""
+    try:
+        description = github.description(config["gh_host"], repo, pr)
+    except RuntimeError as error:
+        # A network failure must not strand a finished phase. Say it and let the handoff through.
+        log(f"{repo} #{pr}: could not read the description ({error}); handing off without the check")
+        return [], recorded
+    sections = phase_sections_in(description)
+    problems = []
+    if phase not in sections:
+        problems.append(f"the description has no `## Phase {phase}` section. Read the current body "
+                        f"(`gh pr view {pr} --json body --jq .body > body.md`), append the phase {phase} "
+                        f"section to it, `gh pr edit {pr} --body-file body.md`, then run the handoff again.")
+    lost = [each for each in recorded if each not in sections]
+    if lost:
+        problems.append(f"the description lost the section(s) for phase(s) {', '.join(str(each) for each in lost)}. "
+                        "Never compose the body from memory: read it, keep every section and every edit the "
+                        "user made, and append yours.")
+    return problems, sections
+
+
 def handoff(arguments):
     config = load_config()
     pr = int(argument_value(arguments, "--pr") or 0)
@@ -474,15 +505,25 @@ def handoff(arguments):
     branch = run(["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"])
     head = run(["git", "-C", str(root), "rev-parse", "HEAD"])
     current = state_store.load(repo, pr) or {"repo": repo, "pr": pr, "consumed_approval_ids": [], "registered_at": now_iso()}
+    problems, sections = description_violations(config, repo, pr, phase, current.get("phase_sections") or [])
+    if problems:
+        for problem in problems:
+            print(f"phased: {problem}")
+        raise SystemExit(f"phased: phase {phase} is not handed off. The code is pushed; the record is not complete.")
     window = tmux.current_window_id() or current.get("window_id")
     if window:
         tmux.rename_window(window, f"pr{pr}")
     current.update({"branch": branch, "request": request_number(branch), "worktree": str(root), "phase": phase,
                     "status": STATUS_WAITING, "phase_head": head, "handoff_at": now_iso(), "window_id": window,
+                    "phase_sections": sections,
                     "resume_attempts": 0, "last_resume_at": None, "resume_gave_up": False})
     state_store.save(repo, pr, current, f"handoff phase {phase}")
     if config.get("labels"):
         github.set_label(config["gh_host"], repo, pr, f"phase:{phase}")
+        # The daemon removes the old label when it starts a phase, but a phase handed off without the
+        # daemon starting it would leave both labels on the pull request.
+        for earlier in range(1, phase):
+            github.remove_label(config["gh_host"], repo, pr, f"phase:{earlier}")
     say(f"{repo} #{pr}: phase {phase} handed off at {head[:10]}; waiting for {config['me']}'s comment `Approved` newer than that head"
         + (f" (window {window})" if window else " (not inside tmux: a new window will open for the next phase)"))
 

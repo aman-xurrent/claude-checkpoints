@@ -36,7 +36,17 @@ branch name `requests/<id>-*`, `<n>` the PR number.
      (`.claude/bin/xurrent-api PATCH /requests/<id> '{"custom_fields":[{"id":"review","value":"<url>"}]}'`).
    - Every phase appends a `## Phase N` section to the description: the done criteria as a ticked checklist,
      what the phase changed in three lines, and the phase's own notes (phase 1 discovery, phase 5 audit).
-     Write the whole body to a file and `GH_HOST=git.4me.com gh pr edit <n> --body-file <file>`.
+     Append it to the body that is there now. Never compose the body from memory:
+
+     ```
+     GH_HOST=git.4me.com gh pr view <n> --json body --jq .body > body.md   # read what is there
+     # append your `## Phase N` section to body.md, changing nothing above it
+     GH_HOST=git.4me.com gh pr edit <n> --body-file body.md
+     ```
+
+     Reading first is not optional. A body written from memory deletes the earlier phases and every edit
+     the user made, and that deletion is silent. `phased handoff` refuses a phase whose section is missing
+     from the description, and refuses one whose description lost a section it had at the last handoff.
      The PR description is the record of the work. Nothing about the phases is written into the repository.
 5. Xurrent, one PATCH: `source .claude/bin/xurrent-constants`, then
    `.claude/bin/xurrent-api PATCH "/requests/<id>" '{"member_id": <my person id>, "agile_board_column_id": <review column>}'`

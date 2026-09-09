@@ -470,3 +470,34 @@ The trace added in decision 26 settled what had actually happened: every `pre-pu
 exited 0, including the two real pushes that ran while the report was being written. No push had been
 refused. The change sits uncommitted in its worktree, so the refusal was still ahead of it, correctly
 predicted from the code.
+
+## 29. A phase is not done until the record says so
+
+The user reported that phase 3 changed the code but left the description at phase 2. The record shows
+otherwise: the daemon started phase 3 at 08:49:24, the session handed off at 08:53:52, and the description
+carries `## Phase 3` written at that handoff, with `phase:3` the only label on the pull request. The
+report was almost certainly written inside those four minutes.
+
+The real defect was next to it. The description holds `## Phase 2` and `## Phase 3` and no `## Phase 1`
+at all. The body file phase 3 wrote is still on disk and starts at `## Phase 2` with no phase 1 content,
+so the loss happened earlier and phase 3 carried it forward. The cause is the ceremony, which said "write
+the whole body to a file": every phase rebuilt the record from memory, and whatever a session did not
+remember to retype disappeared, including anything the user had edited. Phase 1 of PR 1027 held the plan
+for the whole task, and it is unrecoverable: GitHub exposes no revision history for a pull request body,
+and that worktree kept no session transcript.
+
+Two changes. The ceremony now reads the body before it writes one (`gh pr view <n> --json body --jq .body
+> body.md`, append, `gh pr edit --body-file body.md`), and says that reading first is not optional.
+`phased handoff` enforces it: it refuses a phase whose `## Phase N` section is missing from the
+description, and refuses one whose description lost a section it carried at the last handoff, which state
+records as `phase_sections`. The check runs before any state is written, so a refused handoff leaves the
+phase `working` with the code pushed and nothing else changed; verified in all three cases. A description
+that cannot be read is logged and let through, so a network failure cannot strand a finished phase.
+
+The handoff now also removes the earlier phases' labels, which only the phase start used to do.
+
+One more thing the record got wrong, worth naming because the pull request is the record: the phase 2
+section says the push "needed a one-shot skip" and that "the user cleared it with a one-shot skip".
+`~/.local/state/gate/skips.log` holds exactly one entry, a dry run from 2026-09-07, and that push landed
+after the `pushed_revisions` fix that removed the refusal. No skip was granted. That paragraph credits a
+skip for work the fix unblocked.

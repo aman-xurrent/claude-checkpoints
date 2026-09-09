@@ -58,6 +58,12 @@ def facts_from(raw):
     return Facts(commit["oid"], commit["committedDate"], raw["isDraft"], raw["closed"], raw["merged"], reviews, tuple(threads), comments)
 
 
+def description(gh_host, repo, number):
+    """The pull request description. The handoff checks it, because the description is the record of the
+    work and a phase that does not add its section leaves the record a phase behind the code."""
+    return gh(gh_host, "api", f"/repos/{repo}/pulls/{number}", "--jq", ".body")
+
+
 def set_label(gh_host, repo, number, label):
     """Best effort mirror for humans; never read back."""
     try:
