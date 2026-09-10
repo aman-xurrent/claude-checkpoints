@@ -556,3 +556,31 @@ body on an older commit or before the handoff does nothing; a seen body does not
 body is not the author's feedback; an empty body is nothing; a body carrying `@claude` is left to
 ghmention. Verified live: `decide` returned `StartPhase(4, ...)` for the real review, and the daemon
 started phase 4 in the pull request's window.
+
+## 32. Feedback reaches a phase that is still open
+
+The user commented on PR 1027, stopped the session, and posted the same comment again. The second one
+did nothing. The first had already been delivered at 08:51:35, and the brief on disk holds the identical
+text, so nothing was lost. The re-post arrived 1m42s later, when the status was `addressing_comments`,
+and `decide` only read feedback while a pull request waited for approval.
+
+Worse than ignored: it was unrecoverable. `feedback_comments` filtered on the last handoff time, so the
+next handoff would move that mark past the comment and it could never fire.
+
+`decide` now returns `DeliverFeedback` for a phase in `working` or `addressing_comments`: the brief is
+typed into the live session and the status stays as it is, because the phase is not finished and nothing
+waits for approval. It fires only when a live window exists; otherwise the feedback is held and the log
+says so, and launching a session stays with the restart path, which knows how to re-orient one.
+
+Two supporting changes make that safe. `comments_seen_at`, which was written and never read, is now the
+floor for comments and reviews: it moves only when feedback was delivered, so a handoff cannot age out
+something nobody answered, and ids still stop anything firing twice. Review threads keep the handoff
+floor, because they have no id memory and would repeat. And a comment carrying the
+`Claude Code, phased session` header that `.claude/bin/pr-comment` stamps is never read as feedback. Those
+comments are posted with the user's token under the user's login, so the loop would otherwise read its own
+comments as the user's and send the session to answer itself. Until now only the handoff floor hid them,
+and lowering the floor would have exposed it.
+
+Nine tests cover it, 58 in total. Verified live: the floor let exactly one comment through and resurrected
+none of the six older unspent ones, and the daemon typed the brief into window @3, where the session read
+it, with the status left at `addressing_comments`.

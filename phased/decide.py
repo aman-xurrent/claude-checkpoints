@@ -73,6 +73,10 @@ FEEDBACK_REVIEW_STATES = ("COMMENTED", "CHANGES_REQUESTED")
 # A comment carrying this marker belongs to the other daemon (ghmention). Reading it as feedback would
 # make the two answer each other.
 MENTION_MARKER = "@claude"
+# `.claude/bin/pr-comment` stamps this on every comment a session posts. Those comments carry the user's
+# login, because they are posted with the user's token, so without this marker the loop reads its own
+# comments as the user's feedback and sends the session back to answer itself.
+SESSION_MARKER = "Claude Code, phased session"
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,16 @@ class StartPhase:
 
 @dataclass(frozen=True)
 class AddressComments:
+    thread_ids: tuple
+    comment_ids: tuple
+    newest_comment_at: str
+    review_ids: tuple = ()
+
+
+@dataclass(frozen=True)
+class DeliverFeedback:
+    """Feedback that arrived while the phase is still being worked on. It goes to the live session as it
+    is, and the phase keeps its status: the work is not finished, so nothing waits for approval yet."""
     thread_ids: tuple
     comment_ids: tuple
     newest_comment_at: str
@@ -152,27 +166,39 @@ def approving_comment(state, facts, me):
     return None
 
 
+def feedback_floor(state):
+    """The moment after which an unseen comment counts as new.
+
+    The last handoff is the wrong mark once feedback can arrive mid-phase: the next handoff would move
+    the mark past a comment nobody has answered, and it could never fire again. `comments_seen_at` only
+    moves when feedback was actually delivered, so it is the honest floor. Comments and reviews are also
+    remembered by id, so a lower floor cannot make one fire twice."""
+    return parse_time(state.get("comments_seen_at") or state["handoff_at"])
+
+
 def feedback_comments(state, facts, me):
     """The approver's conversation comments are feedback unless they are the approval itself. A comment on
     the conversation tab is how a reviewer asks for a change that belongs to no single line, and dropping
     those left the request waiting on an approval the approver never meant to give."""
-    handoff_at = parse_time(state["handoff_at"])
+    floor = feedback_floor(state)
     spent = set(state.get("consumed_approval_ids", [])) | set(state.get("seen_comment_ids", []))
     return [comment for comment in facts.comments
             if comment.author == me and comment.id not in spent
             and not is_approval_text(comment.body) and MENTION_MARKER not in comment.body
-            and parse_time(comment.created_at) > handoff_at]
+            and SESSION_MARKER not in comment.body
+            and parse_time(comment.created_at) > floor]
 
 
 def feedback_reviews(state, facts, me):
     """A review body is where an objection that belongs to no single line lives, and it is stored nowhere
     else. Reading only the conversation tab and the line threads left those unanswered."""
-    handoff_at = parse_time(state["handoff_at"])
+    floor = feedback_floor(state)
     spent = set(state.get("consumed_approval_ids", [])) | set(state.get("seen_comment_ids", []))
     return [review for review in facts.reviews
             if review.author == me and review.id not in spent and review.state in FEEDBACK_REVIEW_STATES
             and review.body.strip() and not is_approval_text(review.body) and MENTION_MARKER not in review.body
-            and parse_time(review.submitted_at) > handoff_at]
+            and SESSION_MARKER not in review.body
+            and parse_time(review.submitted_at) > floor]
 
 
 def decide(state, facts, me) -> Optional[object]:
@@ -180,6 +206,16 @@ def decide(state, facts, me) -> Optional[object]:
         return None
     if facts.merged or facts.closed:
         return MarkDone("pull request merged" if facts.merged else "pull request closed")
+    if state["status"] in (STATUS_WORKING, STATUS_ADDRESSING):
+        # The session is mid-phase. New feedback still reaches it, but the status stays where it is:
+        # the phase is not finished, so nothing is waiting for an approval.
+        comments = feedback_comments(state, facts, me)
+        reviews = feedback_reviews(state, facts, me)
+        if not comments and not reviews:
+            return None
+        newest = max([comment.created_at for comment in comments] + [review.submitted_at for review in reviews])
+        return DeliverFeedback((), tuple(comment.id for comment in comments), newest,
+                               tuple(review.id for review in reviews))
     if state["status"] != STATUS_WAITING:
         return None
     handoff_at = parse_time(state["handoff_at"])

@@ -4,9 +4,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from datetime import datetime, timezone  # noqa: E402
-from decide import (RESUME_COOLDOWN_SECONDS, RESUME_GRACE_SECONDS, RESUME_MAX_ATTEMPTS, AddressComments,  # noqa: E402
-                    Comment, Facts, MarkDone, Review, StartPhase, Thread, decide, decide_resume,
-                    is_approval_text)
+from decide import (RESUME_COOLDOWN_SECONDS, RESUME_GRACE_SECONDS, RESUME_MAX_ATTEMPTS, SESSION_MARKER,  # noqa: E402
+                    AddressComments, Comment, DeliverFeedback, Facts, MarkDone, Review, StartPhase,
+                    Thread, decide, decide_resume, is_approval_text)
 
 ME = "aman-kumar"
 HEAD = "a" * 40
@@ -145,6 +145,61 @@ def resume_for(current, window_alive=False, worktree_exists=True, other_claude_r
     return decide_resume(current, window_alive=window_alive, worktree_exists=worktree_exists,
                          other_claude_running=other_claude_running, now=NOW,
                          seconds_since_start=seconds_since_start)
+
+
+class MidPhaseFeedbackTest(unittest.TestCase):
+    """Feedback posted while a phase is still open. It used to be dropped, and dropped for good, because
+    the next handoff moved the mark past it."""
+
+    def working(self, status="working", seen_at=None, seen_ids=()):
+        current = state(status=status)
+        if seen_at:
+            current["comments_seen_at"] = seen_at
+        current["seen_comment_ids"] = list(seen_ids)
+        return current
+
+    def test_a_comment_while_working_reaches_the_session(self):
+        action = decide(self.working(), facts(comments=[comment(body="stop, the icons are wrong")]), ME)
+        self.assertEqual(action, DeliverFeedback((), ("C1",), "2026-09-07T11:00:00Z", ()))
+
+    def test_a_comment_while_addressing_comments_reaches_the_session(self):
+        action = decide(self.working(status="addressing_comments"),
+                        facts(comments=[comment(body="and this one too")]), ME)
+        self.assertIsInstance(action, DeliverFeedback)
+
+    def test_the_same_comment_does_not_reach_it_twice(self):
+        current = self.working(seen_ids=["C1"])
+        self.assertIsNone(decide(current, facts(comments=[comment(body="stop")]), ME))
+
+    def test_a_reposted_comment_is_new_because_its_id_is_new(self):
+        current = self.working(seen_ids=["C1"], seen_at="2026-09-07T11:00:00Z")
+        repost = comment(body="stop", comment_id="C2", at="2026-09-07T11:02:00Z")
+        self.assertEqual(decide(current, facts(comments=[repost]), ME).comment_ids, ("C2",))
+
+    def test_delivery_never_carries_a_thread(self):
+        action = decide(self.working(), facts(comments=[comment(body="x")], threads=[thread()]), ME)
+        self.assertEqual(action.thread_ids, ())
+
+    def test_an_approval_while_working_is_not_feedback(self):
+        self.assertIsNone(decide(self.working(), facts(comments=[comment()]), ME))
+
+    def test_a_session_comment_is_never_read_as_feedback(self):
+        body = f"\U0001f916 **{SESSION_MARKER}** \u00b7 posted with @aman-kumar's token\n\nphase 7 done"
+        self.assertIsNone(decide(self.working(), facts(comments=[comment(body=body)]), ME))
+        self.assertIsNone(decide(state(), facts(comments=[comment(body=body)]), ME))
+
+    def test_the_floor_follows_what_was_delivered_not_the_handoff(self):
+        # delivered at 11:00, then the phase handed off at 12:00: a comment from 11:30 must still fire
+        current = state(handoff_at="2026-09-07T12:00:00Z")
+        current["comments_seen_at"] = "2026-09-07T11:00:00Z"
+        late = comment(body="you missed this", comment_id="C9", at="2026-09-07T11:30:00Z")
+        self.assertEqual(decide(current, facts(comments=[late]), ME).comment_ids, ("C9",))
+
+    def test_a_comment_below_the_floor_stays_quiet(self):
+        current = state()
+        current["comments_seen_at"] = "2026-09-07T11:00:00Z"
+        old = comment(body="already handled", comment_id="C8", at="2026-09-07T10:30:00Z")
+        self.assertIsNone(decide(current, facts(comments=[old]), ME))
 
 
 class ReviewBodyTest(unittest.TestCase):

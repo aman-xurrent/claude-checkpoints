@@ -34,8 +34,8 @@ import github  # noqa: E402
 import state as state_store  # noqa: E402
 import tmux  # noqa: E402
 from decide import (LAST_PHASE, RESUME_MAX_ATTEMPTS, RESUME_STATUSES, STATUS_ADDRESSING, STATUS_DONE,  # noqa: E402
-                    STATUS_WAITING, STATUS_WORKING, AddressComments, MarkDone, ResumeSession, StartPhase,
-                    decide, decide_resume)
+                    STATUS_WAITING, STATUS_WORKING, AddressComments, DeliverFeedback, MarkDone,
+                    ResumeSession, StartPhase, decide, decide_resume)
 
 CONFIG_PATH = Path(os.environ.get("PHASED_CONFIG", Path.home() / ".config/phased/config.json")).expanduser()
 LOG_PATH = state_store.STATE_ROOT / "phased.log"
@@ -401,6 +401,30 @@ def apply_action(config, current, raw, action, dry_run):
         notify(config, f"{repo} #{pr}", f"{count} piece(s) of feedback sent to the session")
         say(f"PR #{pr}: {len(action.thread_ids)} thread(s), {len(action.comment_ids)} comment(s) and "
             f"{len(action.review_ids)} review(s) sent to window {window}")
+    elif isinstance(action, DeliverFeedback):
+        # Mid-phase feedback goes to the session that is already working, and only there. Opening a window
+        # belongs to the restart path, which knows how to re-orient a session that was lost.
+        session = session_name(config, current)
+        window = tmux.find_live_window(session, f"pr{pr}", current.get("window_id"))
+        if window is None:
+            log(f"PR #{pr}: {len(action.comment_ids) + len(action.review_ids)} piece(s) of feedback are waiting, "
+                f"but no live Claude window; holding them until a session runs")
+            return
+        brief = write_brief(repo, pr, f"{current['phase']}-comments-{action.newest_comment_at.replace(':', '')}",
+                            comments_brief(current, raw, action))
+        count = len(action.comment_ids) + len(action.review_ids)
+        line = (f"New feedback on PR #{pr} while phase {current['phase']} is still open: read @{brief} and address it "
+                f"in this phase, then carry on to the handoff.")
+        if dry_run:
+            say(f"dry-run: would type {count} piece(s) of mid-phase feedback into {window} for PR #{pr}")
+            return
+        tmux.send_line(window, line)
+        current.update({"window_id": window, "comments_seen_at": action.newest_comment_at,
+                        "seen_comment_ids": (current.get("seen_comment_ids", [])
+                                             + list(action.comment_ids) + list(action.review_ids))})
+        state_store.save(repo, pr, current, f"deliver {count} piece(s) of feedback during phase {current['phase']}")
+        notify(config, f"{repo} #{pr}", f"{count} piece(s) of feedback sent to the running phase {current['phase']}")
+        say(f"PR #{pr}: {count} piece(s) of mid-phase feedback typed into window {window}; status stays {current['status']}")
     elif isinstance(action, MarkDone):
         if dry_run:
             say(f"dry-run: would mark PR #{pr} done ({action.reason})")
