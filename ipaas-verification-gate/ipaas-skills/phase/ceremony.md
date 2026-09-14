@@ -34,7 +34,7 @@ record that matches the current diff.
 
 | Slug | Skill | What it looks for |
 | --- | --- | --- |
-| `simplification` | `/agent-skills:code-simplification` | the change is as small as it can be |
+| `simplification` | `/agent-skills:code-simplify` | the change is as small as it can be |
 | `edge-cases` | `/edge-case-hunter` | the inputs and states nobody wrote a case for |
 | `quality` | `/agent-skills:code-review-and-quality` | correctness, readability, architecture, security, performance |
 

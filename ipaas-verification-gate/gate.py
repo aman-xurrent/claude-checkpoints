@@ -208,9 +208,9 @@ DEVIATION_DECIDERS = ("user", "claude")
 # Three skills must look at every code change before it is handed off. The user ran them by hand and
 # the sessions that forgot are the ones that shipped the avoidable findings, so the gate asks for them.
 REQUIRED_REVIEWS = (
-    ("simplification", "agent-skills:code-simplification", "the change is as small as it can be"),
-    ("edge-cases", "edge-case-hunter", "the inputs and states nobody wrote a case for"),
-    ("quality", "agent-skills:code-review-and-quality", "correctness, readability, architecture, security, performance"),
+    ("simplification", "/agent-skills:code-simplify", "the change is as small as it can be"),
+    ("edge-cases", "/edge-case-hunter", "the inputs and states nobody wrote a case for"),
+    ("quality", "/agent-skills:code-review-and-quality", "correctness, readability, architecture, security, performance"),
 )
 REVIEW_SLUGS = tuple(slug for slug, _, _ in REQUIRED_REVIEWS)
 REVIEW_ITEM_REQUIRED_KEYS = ("title", "file", "line", "verdict")
@@ -1512,10 +1512,7 @@ def references_check(root, paths):
 
 
 def finalize(arguments):
-    root = repository_root(os.getcwd())
-    if root is None:
-        print("finalize: not inside a git repository")
-        sys.exit(2)
+    root = require_repository("finalize")
     phase = phase_number(root)
     if "--phase" in arguments:
         phase = int(arguments[arguments.index("--phase") + 1])
@@ -1623,6 +1620,21 @@ def review_stop_message(root):
               "Record the full list, not a summary: each item needs its source file and line.")
 
 
+def require_repository(command):
+    root = repository_root(os.getcwd())
+    if root is None:
+        print(f"{command}: not inside a git repository")
+        sys.exit(2)
+    return root
+
+
+def refuse(command, problems, code=2):
+    print(f"{command}: nothing was recorded.")
+    for problem in problems:
+        print(f"  {problem}")
+    sys.exit(code)
+
+
 def argument_value(arguments, flag, default=None):
     if flag not in arguments:
         return default
@@ -1676,10 +1688,7 @@ def items_file_inside_diff(root, items_file):
 
 def review_record(arguments):
     """Record one skill's full findings against the current diff. The skill wrapper calls this."""
-    root = repository_root(os.getcwd())
-    if root is None:
-        print("review-record: not inside a git repository")
-        sys.exit(2)
+    root = require_repository("review-record")
     slug = argument_value(arguments, "--skill")
     items_file = argument_value(arguments, "--items-file")
     if slug not in REVIEW_SLUGS:
@@ -1700,10 +1709,7 @@ def review_record(arguments):
         sys.exit(2)
     problems = validate_review_items(root, items)
     if problems:
-        print("review-record: the items were not recorded.")
-        for problem in problems:
-            print(f"  {problem}")
-        sys.exit(1)
+        refuse("review-record", problems, code=1)
     skill = dict((each[0], each[1]) for each in REQUIRED_REVIEWS)[slug]
     record = {"slug": slug, "skill": skill, "patch_sha": patch_digest(snapshot_patch(root)),
               "recorded_at": now_iso(), "items": items}
@@ -1725,10 +1731,7 @@ def render_review_items(record):
 def review_section(arguments):
     """The reviews as markdown for the pull request. The full list every time: a section written from
     memory is a section that quietly loses items."""
-    root = repository_root(os.getcwd())
-    if root is None:
-        print("review-section: not inside a git repository")
-        sys.exit(2)
+    root = require_repository("review-section")
     state = review_state(root)
     lines = ["### Review skills", ""]
     for slug, skill, purpose in REQUIRED_REVIEWS:
@@ -1857,48 +1860,45 @@ def parse_region(text):
     return {"x": x, "y": y, "width": width, "height": height}
 
 
-def deviation(arguments):
-    """Record one deliberate difference between the design or the spec and the build."""
-    root = repository_root(os.getcwd())
-    if root is None:
-        print("deviation: not inside a git repository")
-        sys.exit(2)
-    identifier = argument_value(arguments, "--id")
-    kind = argument_value(arguments, "--kind")
-    summary = argument_value(arguments, "--summary")
-    reason = argument_value(arguments, "--reason")
-    decided_by = argument_value(arguments, "--decided-by", "claude")
-    evidence = argument_value(arguments, "--evidence")
+def deviation_problems(record):
     problems = []
-    if not identifier or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", identifier):
+    if not record["id"] or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", record["id"]):
         problems.append("--id wants a lower case slug, for example no-avatar-column")
-    if kind not in DEVIATION_KINDS:
+    if record["kind"] not in DEVIATION_KINDS:
         problems.append(f"--kind must be one of {', '.join(DEVIATION_KINDS)}")
-    if not summary:
+    if not record["summary"]:
         problems.append("--summary wants one line saying what differs")
-    if not reason:
+    if not record["reason"]:
         problems.append("--reason wants one line saying why")
-    if decided_by not in DEVIATION_DECIDERS:
+    if record["decided_by"] not in DEVIATION_DECIDERS:
         problems.append(f"--decided-by must be one of {', '.join(DEVIATION_DECIDERS)}")
-    if decided_by == "user" and not evidence:
+    if record["decided_by"] == "user" and not record["evidence"]:
         problems.append("--evidence is required with --decided-by user: quote where the user decided it, "
                         "or give the comment URL. Only a user decision lets a design mismatch pass.")
+    return problems
+
+
+def deviation(arguments):
+    """Record one deliberate difference between the design or the spec and the build."""
+    root = require_repository("deviation")
+    problems = []
     try:
         region = parse_region(argument_value(arguments, "--region"))
     except ValueError as error:
         region = None
         problems.append(str(error))
-    if problems:
-        print("deviation: nothing was recorded.")
-        for problem in problems:
-            print(f"  {problem}")
-        sys.exit(2)
-    record = {"id": identifier, "kind": kind, "summary": summary, "reason": reason,
+    record = {"id": argument_value(arguments, "--id"), "kind": argument_value(arguments, "--kind"),
+              "summary": argument_value(arguments, "--summary"), "reason": argument_value(arguments, "--reason"),
               "source": argument_value(arguments, "--source"), "region": region,
-              "decided_by": decided_by, "evidence": evidence, "recorded_at": now_iso()}
-    write_json(deviations_directory(root) / f"{identifier}.json", record)
-    weight = "a design mismatch inside it may pass" if decided_by == "user" else "it does not let any mismatch pass"
-    print(f"deviation: {identifier} recorded ({decided_by} decided, {weight})")
+              "decided_by": argument_value(arguments, "--decided-by", "claude"),
+              "evidence": argument_value(arguments, "--evidence"), "recorded_at": now_iso()}
+    problems += deviation_problems(record)
+    if problems:
+        refuse("deviation", problems)
+    write_json(deviations_directory(root) / f"{record['id']}.json", record)
+    weight = ("a design mismatch inside it may pass" if record["decided_by"] == "user"
+              else "it does not let any mismatch pass")
+    print(f"deviation: {record['id']} recorded ({record['decided_by']} decided, {weight})")
 
 
 def deviations_section(root):
