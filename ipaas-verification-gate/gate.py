@@ -205,6 +205,15 @@ DEVIATION_KINDS = ("design", "spec")
 # recorded is a note, and it never suppresses a mismatch.
 DEVIATION_DECIDERS = ("user", "claude")
 
+# How far an edge may move before the build stops matching the design, in CSS pixels.
+# Per edge, not as a ratio: the same one pixel error scores 0.9986 on a 1428px card and
+# 0.9535 on a 42px label, so one overlap threshold passes the card and fails the label.
+FIGMA_TOLERANCE = int(os.environ.get("FIGMA_TOLERANCE", 2))
+# A Figma text node is as tall as its line box; a DOM range is as tall as its ink. For 14px
+# text that is 24 against 17 every time, on text that matches. Height is not compared for text.
+FIGMA_TEXT_EDGES = ("left", "top", "width")
+FIGMA_BOX_EDGES = ("left", "top", "width", "height")
+
 # Three skills must look at every code change before it is handed off. The user ran them by hand and
 # the sessions that forgot are the ones that shipped the avoidable findings, so the gate asks for them.
 REQUIRED_REVIEWS = (
@@ -285,7 +294,7 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links")
+                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
 
@@ -1748,6 +1757,124 @@ def review_section(arguments):
     print("\n".join(lines).rstrip() + "\n")
 
 
+# ---------------------------------------------------------- figma compare
+
+def figma_key(text):
+    return re.sub(r"\s+", " ", text or "").strip().lower().rstrip(":")
+
+
+def edge_deltas(design, built, offset_y):
+    return {"left": round(built["x"] - design["x"], 1),
+            "top": round((built["y"] + offset_y) - design["y"], 1),
+            "width": round(built["w"] - design["w"], 1),
+            "height": round(built["h"] - design["h"], 1)}
+
+
+def overlap_ratio(design, built, offset_y):
+    """Intersection over union. Reported as evidence, never as the verdict."""
+    ax, ay, aw, ah = design["x"], design["y"], design["w"], design["h"]
+    bx, by, bw, bh = built["x"], built["y"] + offset_y, built["w"], built["h"]
+    wide = max(0, min(ax + aw, bx + bw) - max(ax, bx))
+    tall = max(0, min(ay + ah, by + bh) - max(ay, by))
+    intersection = wide * tall
+    union = aw * ah + bw * bh - intersection
+    return round(intersection / union, 4) if union else 0.0
+
+
+def inside_region(box, region):
+    return (box["x"] >= region["x"] and box["y"] >= region["y"]
+            and box["x"] + box["w"] <= region["x"] + region["width"]
+            and box["y"] + box["h"] <= region["y"] + region["height"])
+
+
+def excused_by(box, deviations):
+    """Only a user decision excuses a difference. A note Claude wrote excuses nothing."""
+    for record in deviations:
+        region = record.get("region")
+        if record.get("decided_by") == "user" and region and inside_region(box, region):
+            return record["id"]
+    return None
+
+
+def compare_figma(design, built, offset_y, tolerance, deviations, exempt_texts):
+    findings, matched = [], []
+    # A list repeats the same label on every row, so pair the nth design occurrence with the nth
+    # built occurrence. Pairing every one of them to the first match reports every row after the
+    # first as moved by the row pitch, which is noise that buries the real differences.
+    built_texts = {}
+    for item in built.get("texts", []):
+        built_texts.setdefault(figma_key(item["text"]), []).append(item)
+    for each in built_texts.values():
+        each.sort(key=lambda item: (item["y"], item["x"]))
+    taken = {}
+    for item in sorted(design.get("texts", []), key=lambda each: (each["y"], each["x"])):
+        key = figma_key(item["text"])
+        if not key or key in exempt_texts:
+            continue
+        candidates = built_texts.get(key, [])
+        index = taken.get(key, 0)
+        partner = candidates[index] if index < len(candidates) else None
+        taken[key] = index + 1
+        if partner is None:
+            findings.append({"kind": "missing", "text": item["text"], "id": item.get("id"),
+                             "detail": "the design has this text and the build does not"})
+            continue
+        # A fixed-width text box reports the box, not the glyph run, so its width says nothing.
+        edges = FIGMA_TEXT_EDGES if item.get("hugs", True) else ("left", "top")
+        deltas = edge_deltas(item, partner, offset_y)
+        over = {edge: deltas[edge] for edge in edges if abs(deltas[edge]) > tolerance}
+        record = {"text": item["text"], "id": item.get("id"), "deltas": deltas,
+                  "overlap": overlap_ratio(item, partner, offset_y)}
+        if not over:
+            matched.append(record)
+            continue
+        excuse = excused_by(item, deviations)
+        record["kind"] = "excused" if excuse else "moved"
+        record["over"] = over
+        if excuse:
+            record["deviation"] = excuse
+        findings.append(record)
+    return findings, matched
+
+
+def figma_compare(arguments):
+    design_path = argument_value(arguments, "--design")
+    built_path = argument_value(arguments, "--built")
+    if not design_path or not built_path:
+        print("figma-compare: --design <file> and --built <file> are both required")
+        sys.exit(2)
+    design = read_json(design_path)
+    built = read_json(built_path)
+    if design is None or built is None:
+        print("figma-compare: one of the files is missing or is not valid JSON")
+        sys.exit(2)
+    offset_y = float(argument_value(arguments, "--offset-y", 0))
+    tolerance = float(argument_value(arguments, "--tolerance", FIGMA_TOLERANCE))
+    exempt = {figma_key(each) for each in (argument_value(arguments, "--exempt-text", "") or "").split("|") if each.strip()}
+    root = repository_root(os.getcwd())
+    deviations = read_deviations(root) if root else []
+    findings, matched = compare_figma(design, built, offset_y, tolerance, deviations, exempt)
+    moved = [each for each in findings if each.get("kind") == "moved"]
+    missing = [each for each in findings if each.get("kind") == "missing"]
+    excused = [each for each in findings if each.get("kind") == "excused"]
+    if "--json" in arguments:
+        print(json.dumps({"matched": matched, "moved": moved, "missing": missing, "excused": excused}, indent=2))
+        return
+    print(f"tolerance {tolerance:g}px per edge, y offset {offset_y:g}px, {len(design.get('texts', []))} design text node(s)")
+    print(f"matched {len(matched)}, moved {len(moved)}, missing {len(missing)}, excused {len(excused)}")
+    for each in missing:
+        print(f"  MISSING  {each['text'][:60]!r}  ({each['id']})")
+    for each in moved:
+        over = ", ".join(f"{edge} {value:+g}px" for edge, value in each["over"].items())
+        print(f"  MOVED    {each['text'][:44]!r}  {over}  (overlap {each['overlap']})")
+    for each in excused:
+        print(f"  EXCUSED  {each['text'][:44]!r}  by deviation {each['deviation']}")
+    if not matched and not moved:
+        print("figma-compare: nothing was compared. A run that pairs no element proves nothing.")
+        sys.exit(1)
+    sys.exit(1 if moved or missing else 0)
+
+
 # ------------------------------------------------------------ design links
 
 FIGMA_URL = re.compile(r"https?://(?:www\.)?figma\.com/(?:design|file|proto)/[^\s<>\"')\]]+")
@@ -2951,6 +3078,7 @@ def main(argv):
         "review-section": lambda: review_section(arguments),
         "deviation": lambda: deviation(arguments),
         "design-links": lambda: design_links(arguments),
+        "figma-compare": lambda: figma_compare(arguments),
     }
     if command not in dispatch:
         print(f"unknown subcommand {command}\n{__doc__}")
