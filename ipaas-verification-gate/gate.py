@@ -81,13 +81,13 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record")
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
                          "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
-                         "**/.claude/bin/review-record", "**/.claude/deviations/",
+                         "**/.claude/bin/review-record", "**/.claude/bin/deviation", "**/.claude/deviations/",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -261,7 +261,7 @@ GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".cla
                          ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
                           ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
-                          ".claude/bin/review-record",
+                          ".claude/bin/review-record", ".claude/bin/deviation",
                           "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
@@ -285,7 +285,7 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation")
+                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
 
@@ -1745,6 +1745,91 @@ def review_section(arguments):
     print("\n".join(lines).rstrip() + "\n")
 
 
+# ------------------------------------------------------------ design links
+
+FIGMA_URL = re.compile(r"https?://(?:www\.)?figma\.com/(?:design|file|proto)/[^\s<>\"')\]]+")
+FIGMA_FILE_KEY = re.compile(r"/(?:design|file|proto)/([A-Za-z0-9]+)")
+FIGMA_NODE_ID = re.compile(r"[?&]node-id=([0-9]+[-:][0-9]+)")
+HTML_TAG = re.compile(r"<[^>]+>")
+HTML_ENTITIES = (("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"), ("&amp;", "&"))
+
+
+def plain_text(value):
+    """A Xurrent field can hold HTML. Turn it into lines, because a label and its link share a line."""
+    text = HTML_TAG.sub("\n", str(value))
+    for entity, character in HTML_ENTITIES:
+        text = text.replace(entity, character)
+    return text
+
+
+def collect_text(value, found=None):
+    """Every string anywhere in the request payload, so a link is found whatever field holds it."""
+    found = [] if found is None else found
+    if isinstance(value, str):
+        found.append(value)
+    elif isinstance(value, dict):
+        for item in value.values():
+            collect_text(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            collect_text(item, found)
+    return found
+
+
+def clean_label(text):
+    """The words before the link, with the markdown link scaffolding taken off: a line reads
+    `Runbook List ...: [https://...](https://...)`, and the label is everything before the bracket."""
+    label = re.sub(r"[\[\]()]", " ", text)
+    label = re.sub(r"\s+", " ", label).strip()
+    return label.strip(" -*:").strip()
+
+
+def design_links_in(text):
+    """A labelled Figma link: the words before the link on its line say what the design is."""
+    links, seen = [], set()
+    for line in plain_text(text).splitlines():
+        for url in FIGMA_URL.findall(line):
+            url = url.rstrip(".,;")
+            if url in seen:
+                continue
+            seen.add(url)
+            label = clean_label(line[:line.index(url)])
+            file_key = FIGMA_FILE_KEY.search(url)
+            node = FIGMA_NODE_ID.search(url)
+            node_id = node.group(1).replace("-", ":") if node else None
+            links.append({"label": label or "unlabelled", "url": url,
+                          "file_key": file_key.group(1) if file_key else None, "node_id": node_id})
+    return links
+
+
+def design_links(arguments):
+    """The labelled Figma links in a request. Feed it the request JSON:
+
+        .claude/bin/xurrent-api "/requests/<id>?fields=custom_fields" | gate.py design-links
+    """
+    source = argument_value(arguments, "--file")
+    raw = Path(source).read_text() if source else sys.stdin.read()
+    try:
+        payload = json.loads(raw)
+        pieces = collect_text(payload)
+    except json.JSONDecodeError:
+        pieces = [raw]
+    links, seen = [], set()
+    for piece in pieces:
+        for link in design_links_in(piece):
+            if link["url"] not in seen:
+                seen.add(link["url"])
+                links.append(link)
+    if "--json" in arguments:
+        print(json.dumps(links, indent=2))
+        return
+    if not links:
+        print("design-links: no Figma link in the request")
+        return
+    for link in links:
+        print(f"{link['label']}\n    file {link['file_key']}  node {link['node_id']}\n    {link['url']}\n")
+
+
 # -------------------------------------------------------------- deviations
 
 def deviations_directory(root):
@@ -2865,6 +2950,7 @@ def main(argv):
         "review-record": lambda: review_record(arguments),
         "review-section": lambda: review_section(arguments),
         "deviation": lambda: deviation(arguments),
+        "design-links": lambda: design_links(arguments),
     }
     if command not in dispatch:
         print(f"unknown subcommand {command}\n{__doc__}")

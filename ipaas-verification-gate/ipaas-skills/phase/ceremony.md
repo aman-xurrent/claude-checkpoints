@@ -15,6 +15,16 @@ branch name `requests/<id>-*`, `<n>` the PR number.
    (`.claude/bin/xurrent-api "/requests/<id>?fields=custom_fields"`) and the PR description with the earlier
    phase sections (`GH_HOST=git.4me.com gh pr view <n> --json body --jq .body`). `AGENTS.md` and the sub-project
    `AGENTS.md` of every area you touch.
+4. When the change touches the interface, list the design links. The user puts a labelled Figma link in the
+   request, and the links live in the **notes**, not in the request fields:
+
+   ```
+   .claude/bin/xurrent-api "/requests/<id>/notes?per_page=100" | python3 ~/personal/scripts/gate/gate.py design-links
+   ```
+
+   It prints each label with its Figma file key and node id (`721:23920`). Fetch every node listed, not the
+   one that looks most relevant. A label that says "Full page design with chrome layout wrapper" means the
+   frame holds a mock browser toolbar above the page, so the page area does not start at the frame's top.
 
 ## Review skills
 
@@ -46,6 +56,22 @@ records an empty list.
 Judge scope by one rule. A pre-existing problem that the change touches belongs in this pull request. A
 pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
 request. "Pre-existing" alone is never a reason to leave it.
+
+## Deliberate differences
+
+When the build does not follow the design or the spec on purpose, record it:
+
+```
+.claude/bin/deviation --id no-avatar-column --kind design \
+  --summary "the avatar column is not built" --reason "the team dropped it from this release" \
+  --source "figma 721:23920" --region 1104,98,180,640 \
+  --decided-by user --evidence "<the user's words, or the comment URL>"
+```
+
+Only the user decides that a difference is deliberate, and `--decided-by user` needs `--evidence`. Without
+it the record is a note from you: it explains the difference and it lets no mismatch pass. `--region` is the
+page area in pixels that the design comparison crops out and diffs on its own. Ask the user before you
+record a design difference. Never record one to make a comparison pass.
 
 `.claude/bin/review-record --section` prints all three lists as markdown. Paste it into the phase section
 so the pull request carries every item with its source.

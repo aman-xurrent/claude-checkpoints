@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Record one deliberate difference between the design (or the spec) and the build.
+#
+# Usage:
+#   .claude/bin/deviation --id <slug> --kind design|spec \
+#       --summary "what differs" --reason "why" \
+#       [--source "figma 721-23920"] [--region x,y,width,height] \
+#       [--decided-by user --evidence "where the user decided it"]
+#
+# Only a user decision lets a design mismatch pass, and it needs --evidence. A record without
+# --decided-by user is a note from Claude: it explains the difference and lets nothing pass.
+# --region is the page area in pixels that the build does not follow, which the design
+# comparison crops out and diffs on its own.
+#
+# Exit codes: 0 recorded, 2 bad usage, 3 the gate is not installed.
+set -euo pipefail
+
+GATE_PY="${IPAAS_GATE_PY:-$HOME/personal/scripts/gate/gate.py}"
+
+if [[ ! -f "$GATE_PY" ]]; then
+  echo "deviation: gate.py not found at $GATE_PY. Install the verification gate or set IPAAS_GATE_PY." >&2
+  exit 3
+fi
+
+exec python3 "$GATE_PY" deviation "$@"
