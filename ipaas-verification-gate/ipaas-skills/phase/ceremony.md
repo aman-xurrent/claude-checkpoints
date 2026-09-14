@@ -16,6 +16,40 @@ branch name `requests/<id>-*`, `<n>` the PR number.
    phase sections (`GH_HOST=git.4me.com gh pr view <n> --json body --jq .body`). `AGENTS.md` and the sub-project
    `AGENTS.md` of every area you touch.
 
+## Review skills
+
+Three skills look at every code change before it is handed off. Run all three whenever the phase changed
+code, in every session, not only at handoff. The gate fails `agent_task_finalize` until each one has a
+record that matches the current diff.
+
+| Slug | Skill | What it looks for |
+| --- | --- | --- |
+| `simplification` | `/agent-skills:code-simplification` | the change is as small as it can be |
+| `edge-cases` | `/edge-case-hunter` | the inputs and states nobody wrote a case for |
+| `quality` | `/agent-skills:code-review-and-quality` | correctness, readability, architecture, security, performance |
+
+Record every item a skill returned, never a summary. Write the items file **outside the repository**
+(use the session scratchpad): a file inside the working tree joins the diff and makes the records stale.
+
+```
+cat > "$TMPDIR/simplification.json" <<'JSON'
+[{"title": "the same guard runs twice", "file": "platform/app/x.ts", "line": 42,
+  "verdict": "fixed", "detail": "one line of what it is and what you did"}]
+JSON
+.claude/bin/review-record --skill simplification --items-file "$TMPDIR/simplification.json"
+```
+
+`verdict` is one of `fixed`, `in-scope`, `out-of-scope`, `no-change-needed`. The gate checks that every
+file exists and every line is inside it, so an invented source is refused. A skill that returned nothing
+records an empty list.
+
+Judge scope by one rule. A pre-existing problem that the change touches belongs in this pull request. A
+pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
+request. "Pre-existing" alone is never a reason to leave it.
+
+`.claude/bin/review-record --section` prints all three lists as markdown. Paste it into the phase section
+so the pull request carries every item with its source.
+
 ## Handoff
 
 1. `.claude/bin/agent_task_finalize --phase N` must exit 0. It runs rubocop, yarn and specs in the checks
@@ -42,7 +76,8 @@ branch name `requests/<id>-*`, `<n>` the PR number.
      ```
 
      The file holds the section content only: the done criteria as a ticked checklist, what the phase
-     changed in three lines, and the phase's own notes (phase 1 discovery, phase 5 audit). Leave the
+     changed in three lines, the output of `.claude/bin/review-record --section` when the phase changed
+     code, and the phase's own notes (phase 1 discovery, phase 5 audit). Leave the
      `## Phase N` heading out, the script writes it. The section is appended when it is new and replaced
      in place when the phase comes back to it after review, so it never appears twice.
 

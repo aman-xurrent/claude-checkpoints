@@ -29,6 +29,8 @@ Subcommands
   checks      apply | reset [--rebuild-dev-db] | status. Put the current branch state into
               the checks worktree for a live check, or return it to origin/main.
   references  Reference impact of removed or renamed definitions (or --name X).
+  review-record --skill S --items-file F   Record one review skill's findings against the
+              current diff. review-section prints the recorded reviews as markdown.
               Verdict per symbol: Unused | Enumerated | Used.
   pr-section  Markdown block for a PR description, stamped from the findings.
   randomized-suite  Run spec/unit under --order rand:SEED in the gate worktree.
@@ -79,12 +81,13 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase")
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
                          "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
+                         "**/.claude/bin/review-record", "**/.claude/deviations/",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -183,6 +186,10 @@ CHECKS_IN_USE_FILE_NAME = "in_use.json"
 CHECKS_LOCK_TIMEOUT_SECONDS = 1800
 
 PROOF_DIRECTORY = Path(".claude/proof")
+DEVIATIONS_PATH = Path(".claude/deviations")
+# What the gate itself writes into the working tree. It is never part of the change under proof:
+# counting it would move the diff digest and make a review or a proof stale the moment it is recorded.
+GATE_STATE_PREFIXES = (str(PROOF_DIRECTORY), str(DEVIATIONS_PATH))
 DECLARATION_FILE_NAME = "declaration.json"
 RUNS_DIRECTORY_NAME = "runs"
 SURFACED_MARKER_NAME = ".surfaced"
@@ -191,6 +198,23 @@ META_FILE_NAME = "meta.json"
 FINDINGS_FILE_NAME = "findings.json"
 LOG_FILE_NAME = "prover.log"
 REFERENCES_DIRECTORY_NAME = "references"
+REVIEWS_DIRECTORY_NAME = "reviews"
+DEVIATIONS_DIRECTORY_NAME = "deviations"
+DEVIATION_KINDS = ("design", "spec")
+# Only the user can decide that the build may differ from the design on purpose. A deviation Claude
+# recorded is a note, and it never suppresses a mismatch.
+DEVIATION_DECIDERS = ("user", "claude")
+
+# Three skills must look at every code change before it is handed off. The user ran them by hand and
+# the sessions that forgot are the ones that shipped the avoidable findings, so the gate asks for them.
+REQUIRED_REVIEWS = (
+    ("simplification", "agent-skills:code-simplification", "the change is as small as it can be"),
+    ("edge-cases", "edge-case-hunter", "the inputs and states nobody wrote a case for"),
+    ("quality", "agent-skills:code-review-and-quality", "correctness, readability, architecture, security, performance"),
+)
+REVIEW_SLUGS = tuple(slug for slug, _, _ in REQUIRED_REVIEWS)
+REVIEW_ITEM_REQUIRED_KEYS = ("title", "file", "line", "verdict")
+REVIEW_VERDICTS = ("fixed", "in-scope", "out-of-scope", "no-change-needed")
 
 UNPROVABLE_RULES = Path(__file__).resolve().parent / "unprovable.yml"
 UNPROVABLE_FIXTURE = Path(__file__).resolve().parent / "unprovable_fixture.rb"
@@ -232,10 +256,12 @@ PHASED_DIRECTORY = Path(__file__).resolve().parent.parent / "phased"
 GUARD_WRITE_TOKENS = (">", "sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "truncate", "python3 -", "cat <<", "ln -", "install ")
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP", "send-pack",
                             "GIT_DIR=", "phased pause", "phased resume", "settings.local.json", "launchctl")
-GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", "personal/scripts/gate", "personal/scripts/phased",
+GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".claude/proof/reviews",
+                         ".claude/deviations", "personal/scripts/gate", "personal/scripts/phased",
                          ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
                           ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
+                          ".claude/bin/review-record",
                           "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
@@ -246,6 +272,7 @@ COMMENT_WRAPPER = ".claude/bin/pr-comment"
 # `.claude/bin/pr-phase` reads the live description and splices in one phase section, so nothing else can
 # be lost. Creating the pull request still writes a whole body, which is phase 1 and is allowed.
 DESCRIPTION_WRAPPER = ".claude/bin/pr-phase"
+REVIEW_WRAPPER = ".claude/bin/review-record"
 GUARD_DESCRIPTION_WRITING = (
     re.compile(r"\bgh\s+pr\s+edit\b[^|;]*--body(-file)?\b"),
     re.compile(r"\bgh\s+api\b[^|;]*\bpulls/\d+\b[^|;]*(-X\s*(PATCH|POST)|--method\s*(PATCH|POST))[^|;]*\bbody\b"),
@@ -258,7 +285,7 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch", "trace")
+                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
 
@@ -445,7 +472,8 @@ def notify(title, message):
 
 def untracked_paths(root):
     completed = git(root, "ls-files", "--others", "--exclude-standard", "-z")
-    return [path for path in completed.stdout.split("\0") if path and not path.startswith(str(PROOF_DIRECTORY))]
+    return [path for path in completed.stdout.split("\0")
+            if path and not any(path.startswith(prefix) for prefix in GATE_STATE_PREFIXES)]
 
 
 def snapshot_patch(root, base=None):
@@ -454,7 +482,7 @@ def snapshot_patch(root, base=None):
     it was committed, which reported a passing proof as stale and a fresh one as vacuous."""
     reference = base or diff_base(root)
     tracked = git(root, "diff", reference, "--binary", "--no-color", "--no-ext-diff",
-                  "--", ".", f":(exclude){PROOF_DIRECTORY}").stdout
+                  "--", ".", f":(exclude){PROOF_DIRECTORY}", f":(exclude){DEVIATIONS_PATH}").stdout
     pieces = [tracked]
     for path in untracked_paths(root):
         piece = git(root, "diff", "--no-index", "--binary", "--no-color", "--",
@@ -917,6 +945,9 @@ def stop_message(root):
             reasons = "; ".join(f"{each['spec_file']}: {each.get('reason', each['status'])}" for each in findings.get("proofs", []) if each["status"] != STATUS_PASS)
             messages.append(f"proof {findings.get('id')} finished {status}. {reasons or findings.get('reason', '')}")
     if code_paths:
+        review_message = review_stop_message(root)
+        if review_message:
+            messages.append(review_message)
         try:
             report = references_report(root)
             write_references_report(root, report)
@@ -1505,6 +1536,7 @@ def finalize(arguments):
     else:
         checks.append(("proof", "skip", f"phase {phase} needs no proof"))
     checks.append(references_check(root, paths))
+    checks.append(review_check(root, paths))
     print_steps(checks)
     if checks[0][1] == "FAIL":
         sys.exit(2)
@@ -1537,6 +1569,270 @@ def tool_checks_in_checks_worktree(root, paths, run_specs):
         finally:
             checks += reset_checks_worktree()
     return checks
+
+
+# ----------------------------------------------------------------- reviews
+
+def reviews_directory(root):
+    return proof_directory(root) / REVIEWS_DIRECTORY_NAME
+
+
+def review_state(root, patch_sha=None):
+    """For every required skill: missing, stale, or the record itself. One function decides, so the Stop
+    hook and finalize can never disagree about whether a review still counts."""
+    current = patch_sha or patch_digest(snapshot_patch(root))
+    state = {}
+    for slug, _skill, _purpose in REQUIRED_REVIEWS:
+        record = read_json(reviews_directory(root) / f"{slug}.json")
+        if record is None:
+            state[slug] = ("missing", None)
+        elif record.get("patch_sha") != current:
+            state[slug] = ("stale", record)
+        else:
+            state[slug] = ("ok", record)
+    return state
+
+
+def review_check(root, paths):
+    if not code_paths_of(paths):
+        return ("reviews", "skip", "no code changed")
+    state = review_state(root)
+    missing = [slug for slug, (status, _) in state.items() if status == "missing"]
+    stale = [slug for slug, (status, _) in state.items() if status == "stale"]
+    if missing or stale:
+        parts = []
+        if missing:
+            parts.append("never run: " + ", ".join(missing))
+        if stale:
+            parts.append("ran against an older diff: " + ", ".join(stale))
+        return ("reviews", "FAIL", "; ".join(parts) + f". Run each skill over the diff, then record it with {REVIEW_WRAPPER}.")
+    counts = ", ".join(f"{slug} {len(record.get('items', []))}" for slug, (_status, record) in state.items())
+    return ("reviews", "ok", counts)
+
+
+def review_stop_message(root):
+    """The Stop hook's line. A session that changed code and ran no review is the failure the user hit by
+    hand every time, so say it at the end of every such session, not only at handoff."""
+    state = review_state(root)
+    owed = [f"{slug} ({skill})" for slug, skill, _purpose in REQUIRED_REVIEWS if state[slug][0] != "ok"]
+    if not owed:
+        return None
+    return (f"{len(owed)} of {len(REQUIRED_REVIEWS)} required reviews are missing or stale for this diff: "
+            + "; ".join(owed)
+            + f". Run each skill over the change, then record every item it returned with {REVIEW_WRAPPER}. "
+              "Record the full list, not a summary: each item needs its source file and line.")
+
+
+def argument_value(arguments, flag, default=None):
+    if flag not in arguments:
+        return default
+    index = arguments.index(flag) + 1
+    return arguments[index] if index < len(arguments) else default
+
+
+def validate_review_items(root, items):
+    """Every item carries a real source. A finding without a file and a line cannot be checked, and the
+    sessions that summarised instead of listing are the ones that dropped findings on the floor."""
+    problems = []
+    if not isinstance(items, list):
+        return ["the items file must hold a JSON list"]
+    for position, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            problems.append(f"item {position}: not an object")
+            continue
+        for key in REVIEW_ITEM_REQUIRED_KEYS:
+            if item.get(key) in (None, ""):
+                problems.append(f"item {position}: `{key}` is missing")
+        verdict = item.get("verdict")
+        if verdict is not None and verdict not in REVIEW_VERDICTS:
+            problems.append(f"item {position}: verdict `{verdict}` is not one of {', '.join(REVIEW_VERDICTS)}")
+        path, line = item.get("file"), item.get("line")
+        if not path or line in (None, ""):
+            continue
+        disk_path = Path(root) / str(path)
+        if not disk_path.is_file():
+            problems.append(f"item {position}: `{path}` does not exist in the repository")
+            continue
+        try:
+            count = len(disk_path.read_text(errors="ignore").splitlines())
+        except OSError:
+            continue
+        if not isinstance(line, int) or line < 1 or line > count:
+            problems.append(f"item {position}: line {line} is outside `{path}` (1 to {count})")
+    return problems
+
+
+def items_file_inside_diff(root, items_file):
+    """An items file written into the working tree is itself part of the diff, so recording it moves the
+    digest and makes the reviews recorded before it stale. Refuse it rather than let that happen silently."""
+    try:
+        path = Path(items_file).resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return False
+    if str(path).startswith(str(PROOF_DIRECTORY)):
+        return False
+    return git(root, "check-ignore", "-q", str(path), allow_exit_codes=(0, 1, 128)).returncode != 0
+
+
+def review_record(arguments):
+    """Record one skill's full findings against the current diff. The skill wrapper calls this."""
+    root = repository_root(os.getcwd())
+    if root is None:
+        print("review-record: not inside a git repository")
+        sys.exit(2)
+    slug = argument_value(arguments, "--skill")
+    items_file = argument_value(arguments, "--items-file")
+    if slug not in REVIEW_SLUGS:
+        print(f"review-record: --skill must be one of {', '.join(REVIEW_SLUGS)}")
+        sys.exit(2)
+    if not items_file:
+        print("review-record: --items-file <path> is required. It holds a JSON list of every item the skill returned.")
+        sys.exit(2)
+    inside = items_file_inside_diff(root, items_file)
+    if inside:
+        print(f"review-record: {items_file} sits in the working tree, so it is part of the diff. "
+              "Writing it changes the diff and makes every review recorded before it stale. "
+              "Write the items file outside the repository, under the session scratchpad or $TMPDIR.")
+        sys.exit(2)
+    items = read_json(items_file)
+    if items is None:
+        print(f"review-record: {items_file} is missing or is not valid JSON")
+        sys.exit(2)
+    problems = validate_review_items(root, items)
+    if problems:
+        print("review-record: the items were not recorded.")
+        for problem in problems:
+            print(f"  {problem}")
+        sys.exit(1)
+    skill = dict((each[0], each[1]) for each in REQUIRED_REVIEWS)[slug]
+    record = {"slug": slug, "skill": skill, "patch_sha": patch_digest(snapshot_patch(root)),
+              "recorded_at": now_iso(), "items": items}
+    write_json(reviews_directory(root) / f"{slug}.json", record)
+    print(f"review-record: {slug} recorded, {len(items)} item(s), diff {record['patch_sha']}")
+
+
+def render_review_items(record):
+    lines = []
+    for item in record.get("items", []):
+        source = f"`{item['file']}:{item['line']}`"
+        lines.append(f"- **{item['title']}** ({item['verdict']}) {source}")
+        detail = (item.get("detail") or "").strip()
+        if detail:
+            lines.append(f"  {detail}")
+    return lines
+
+
+def review_section(arguments):
+    """The reviews as markdown for the pull request. The full list every time: a section written from
+    memory is a section that quietly loses items."""
+    root = repository_root(os.getcwd())
+    if root is None:
+        print("review-section: not inside a git repository")
+        sys.exit(2)
+    state = review_state(root)
+    lines = ["### Review skills", ""]
+    for slug, skill, purpose in REQUIRED_REVIEWS:
+        status, record = state[slug]
+        if status != "ok":
+            lines.append(f"**{skill}** ({purpose}): {status}.")
+            lines.append("")
+            continue
+        items = record.get("items", [])
+        lines.append(f"**{skill}** ({purpose}): {len(items)} item(s).")
+        lines += render_review_items(record) if items else ["- nothing returned."]
+        lines.append("")
+    lines += deviations_section(root)
+    print("\n".join(lines).rstrip() + "\n")
+
+
+# -------------------------------------------------------------- deviations
+
+def deviations_directory(root):
+    return Path(root) / DEVIATIONS_PATH
+
+
+def read_deviations(root):
+    directory = deviations_directory(root)
+    if not directory.is_dir():
+        return []
+    records = [read_json(path) for path in sorted(directory.glob("*.json"))]
+    return [record for record in records if record]
+
+
+def parse_region(text):
+    """`x,y,width,height` in page pixels: the area of the design the build does not follow."""
+    if not text:
+        return None
+    parts = [piece.strip() for piece in text.split(",")]
+    if len(parts) != 4 or not all(piece.lstrip("-").isdigit() for piece in parts):
+        raise ValueError("--region wants four whole numbers: x,y,width,height")
+    x, y, width, height = (int(piece) for piece in parts)
+    if width <= 0 or height <= 0:
+        raise ValueError("--region width and height must be above zero")
+    return {"x": x, "y": y, "width": width, "height": height}
+
+
+def deviation(arguments):
+    """Record one deliberate difference between the design or the spec and the build."""
+    root = repository_root(os.getcwd())
+    if root is None:
+        print("deviation: not inside a git repository")
+        sys.exit(2)
+    identifier = argument_value(arguments, "--id")
+    kind = argument_value(arguments, "--kind")
+    summary = argument_value(arguments, "--summary")
+    reason = argument_value(arguments, "--reason")
+    decided_by = argument_value(arguments, "--decided-by", "claude")
+    evidence = argument_value(arguments, "--evidence")
+    problems = []
+    if not identifier or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", identifier):
+        problems.append("--id wants a lower case slug, for example no-avatar-column")
+    if kind not in DEVIATION_KINDS:
+        problems.append(f"--kind must be one of {', '.join(DEVIATION_KINDS)}")
+    if not summary:
+        problems.append("--summary wants one line saying what differs")
+    if not reason:
+        problems.append("--reason wants one line saying why")
+    if decided_by not in DEVIATION_DECIDERS:
+        problems.append(f"--decided-by must be one of {', '.join(DEVIATION_DECIDERS)}")
+    if decided_by == "user" and not evidence:
+        problems.append("--evidence is required with --decided-by user: quote where the user decided it, "
+                        "or give the comment URL. Only a user decision lets a design mismatch pass.")
+    try:
+        region = parse_region(argument_value(arguments, "--region"))
+    except ValueError as error:
+        region = None
+        problems.append(str(error))
+    if problems:
+        print("deviation: nothing was recorded.")
+        for problem in problems:
+            print(f"  {problem}")
+        sys.exit(2)
+    record = {"id": identifier, "kind": kind, "summary": summary, "reason": reason,
+              "source": argument_value(arguments, "--source"), "region": region,
+              "decided_by": decided_by, "evidence": evidence, "recorded_at": now_iso()}
+    write_json(deviations_directory(root) / f"{identifier}.json", record)
+    weight = "a design mismatch inside it may pass" if decided_by == "user" else "it does not let any mismatch pass"
+    print(f"deviation: {identifier} recorded ({decided_by} decided, {weight})")
+
+
+def deviations_section(root):
+    records = read_deviations(root)
+    if not records:
+        return []
+    lines = ["### Deliberate differences from the design or the spec", ""]
+    for record in records:
+        where = f" `{record['source']}`" if record.get("source") else ""
+        region = record.get("region")
+        area = f" (area {region['x']},{region['y']} {region['width']}x{region['height']})" if region else ""
+        lines.append(f"- **{record['summary']}**{where}{area}")
+        decision = ("The user decided this." if record["decided_by"] == "user"
+                    else "Claude recorded this. It is a note, and it lets no mismatch pass.")
+        lines.append(f"  {record['reason'].rstrip('.')}. {decision}")
+        if record.get("evidence"):
+            lines.append(f"  Evidence: {record['evidence']}")
+    lines.append("")
+    return lines
 
 
 # ------------------------------------------------------------------ guard
@@ -2566,6 +2862,9 @@ def main(argv):
         "randomized-suite": lambda: randomized_suite(arguments),
         "rspec": lambda: locked_rspec(arguments),
         "trace": lambda: trace_command(arguments),
+        "review-record": lambda: review_record(arguments),
+        "review-section": lambda: review_section(arguments),
+        "deviation": lambda: deviation(arguments),
     }
     if command not in dispatch:
         print(f"unknown subcommand {command}\n{__doc__}")

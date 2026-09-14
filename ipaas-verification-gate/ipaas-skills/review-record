@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Record one review skill's findings against the current diff.
+#
+# Usage:
+#   .claude/bin/review-record --skill <simplification|edge-cases|quality> --items-file <path>
+#   .claude/bin/review-record --section          # the recorded reviews as markdown for the PR
+#
+# The items file holds a JSON list. Every item the skill returned gets one entry, never a summary:
+#   [{"title": "...", "file": "platform/app/x.ts", "line": 42,
+#     "verdict": "fixed|in-scope|out-of-scope|no-change-needed", "detail": "..."}]
+# The gate checks that every file exists and every line is inside it, so an invented source is refused.
+#
+# Exit codes: 0 recorded, 1 an item was rejected, 2 bad usage, 3 the gate is not installed.
+set -euo pipefail
+
+GATE_PY="${IPAAS_GATE_PY:-$HOME/personal/scripts/gate/gate.py}"
+
+if [[ ! -f "$GATE_PY" ]]; then
+  echo "review-record: gate.py not found at $GATE_PY. Install the verification gate or set IPAAS_GATE_PY." >&2
+  exit 3
+fi
+
+if [[ "${1:-}" == "--section" ]]; then
+  exec python3 "$GATE_PY" review-section
+fi
+
+exec python3 "$GATE_PY" review-record "$@"
