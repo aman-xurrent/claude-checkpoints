@@ -2190,7 +2190,7 @@ def link_worktree(root, quiet=False):
     binaries.mkdir(parents=True, exist_ok=True)
     for name in LOCAL_BIN_NAMES:
         actions += ensure_symlink(binaries / name, LOCAL_SKILLS_DIRECTORY / name)
-    actions += ensure_copy(root / LOCAL_PROTOCOL_FILE.name, LOCAL_PROTOCOL_FILE)
+    actions += ensure_copy(root / LOCAL_PROTOCOL_FILE.name, LOCAL_PROTOCOL_FILE, refresh=True)
     actions += ensure_copy(root / LOCAL_SETTINGS_FILE, MAIN_REPOSITORY / LOCAL_SETTINGS_FILE)
     actions += ensure_fence(root)
     actions += ensure_exclude_entries(root)
@@ -2210,9 +2210,20 @@ def ensure_symlink(link, target):
     return [f"linked {link} -> {target}"]
 
 
-def ensure_copy(destination, source):
-    if destination.exists() or destination.is_symlink() or not source.exists() or source.resolve() == destination.resolve():
+def ensure_copy(destination, source, refresh=False):
+    if destination.is_symlink() or not source.exists() or source.resolve() == destination.resolve():
         return []
+    if destination.exists():
+        if not refresh or destination.read_bytes() == source.read_bytes():
+            return []
+        # The protocol file is owned by the gate and excluded from git, so a worktree copy that has
+        # fallen behind the source would keep serving rules the user has already replaced. Keep the
+        # replaced text, because nothing else holds it.
+        backup = SKIPS_LOG.parent / "protocol" / f"{destination.name}.{now_iso().replace(':', '')}.bak"
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(destination, backup)
+        shutil.copy2(source, destination)
+        return [f"refreshed {destination} (previous kept at {backup})"]
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     return [f"copied {source.name} -> {destination}"]

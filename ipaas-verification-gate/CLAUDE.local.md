@@ -77,3 +77,113 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
 - Every pull request comment goes through `.claude/bin/pr-comment --pr N --title "..." --body-file <path>`,
   which stamps who posted it and folds the body into a collapsed block. `gh pr comment`, `gh pr review` and
   the comment API are denied, because a raw post is indistinguishable from one the user wrote.
+
+## Review skills (three, every session that changed code)
+
+Three skills look at every code change. Run all three whenever the session changed code, not only at
+a handoff. `agent_task_finalize` fails and the Stop hook says so until each one has a record that
+matches the current diff.
+
+| Slug | Skill | What it looks for |
+| --- | --- | --- |
+| `simplification` | `/agent-skills:code-simplify` | the change is as small as it can be |
+| `edge-cases` | `/edge-case-hunter` | the inputs and states nobody wrote a case for |
+| `quality` | `/agent-skills:code-review-and-quality` | correctness, readability, architecture, security, performance |
+
+Command names and skill names differ. The plugin keeps its commands in
+`~/.claude/plugins/cache/addy-agent-skills/agent-skills/1.0.0/.claude/commands/`, so `code-simplify` is
+the command and `code-simplification` is the skill it invokes. Read that directory before you call a
+name wrong.
+
+Record every item a skill returned, never a summary. Write the items file **outside the repository**:
+a file inside the working tree joins the diff and makes the records stale the moment they are written.
+
+```
+cat > "$TMPDIR/quality.json" <<'JSON'
+[{"title": "the same guard runs twice", "file": "platform/app/x.ts", "line": 42,
+  "verdict": "fixed", "detail": "one line of what it is and what you did"}]
+JSON
+.claude/bin/review-record --skill quality --items-file "$TMPDIR/quality.json"
+```
+
+`verdict` is one of `fixed`, `in-scope`, `out-of-scope`, `no-change-needed`. The gate checks that every
+file exists and every line is inside it, so an invented source is refused. A skill that returned nothing
+records an empty list. `.claude/bin/review-record --section` prints all three lists as markdown for the
+pull request.
+
+Judge scope by one rule. A pre-existing problem that the change touches belongs in this pull request. A
+pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
+request. "Pre-existing" alone is never a reason to leave it.
+
+## Design links live in the request notes
+
+The user puts a labelled Figma link in the request. The links are in the **notes**, not in the request
+fields:
+
+```
+.claude/bin/xurrent-api "/requests/<id>/notes?per_page=100" | python3 ~/personal/scripts/gate/gate.py design-links
+```
+
+It prints each label with its Figma file key and node id (`721:23920`). Fetch every node it lists, not
+the one that looks most relevant. A label that says "Full page design with chrome layout wrapper" means
+the frame holds a mock browser toolbar above the page, so the page does not start at the frame's top.
+
+## Matching a design (measure it, never judge it by eye)
+
+1. Seed the local database with the design's own copy. The database is local and one per request, so
+   change it freely. Text is how the comparison pairs elements: without the same copy nothing pairs.
+2. Read the design: run `~/personal/scripts/gate/figma/extract-design.js` through `use_figma` with the
+   frame id. Fetch every node.
+3. Render the built page at the design's width, then paste
+   `~/personal/scripts/gate/figma/extract-built.js` into the page.
+4. Compare:
+
+```
+python3 ~/personal/scripts/gate/gate.py figma-compare \
+  --design design.json --built built.json --offset-y 76 --tolerance 2
+```
+
+`--offset-y` is the height of the mock browser toolbar in the design frame. Read it from the node tree:
+on the iPaaS handoff file the `Chrome / Toolbar` instance is 76 tall, so the page starts at y=76.
+
+Three rules the real data proved. The tool already applies them. Do not work around them by hand.
+
+- **Measure text with `Range`, never with the element box.** A Figma text node is as wide as its glyph
+  run. The `<h3>` holding the same words is as wide as its column: 1272px against 182px.
+- **Never compare the height of text.** Figma reports the line box and the DOM reports the ink. For 14px
+  text that is 24 against 17 on text that matches exactly.
+- **Compare the width of a text node only when it hugs its content.** A fixed-width text box reports the
+  box: the card description is an 800px box holding a 525px sentence.
+
+Pass and fail come from the per-edge pixel delta, not from the overlap ratio. Overlap is evidence only.
+Measured on the runbook list: one pixel of error scores 0.9986 overlap on a 1428px card and 0.9535 on a
+42px label, so one ratio passes the card and fails the label for the same error. A title sitting 2.5px
+low scores 0.70. A run that pairs nothing fails: a comparison that compared no element proves nothing.
+
+## Deliberate differences
+
+When the build does not follow the design or the spec on purpose, record it:
+
+```
+.claude/bin/deviation --id no-avatar-column --kind design \
+  --summary "the avatar column is not built" --reason "the team dropped it from this release" \
+  --source "figma 721:23920" --region 1104,98,180,640 \
+  --decided-by user --evidence "<the user's words, or the comment URL>"
+```
+
+Only the user decides that a difference is deliberate, and `--decided-by user` needs `--evidence`.
+Without it the record is a note from you: it explains the difference and it lets no mismatch pass.
+`--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
+design difference. Never record one to make a comparison pass.
+
+## Diagram replies
+
+The user answers a diagram with `R:` marks. When they say they updated one, read the marks instead of
+reading the picture:
+
+```
+~/personal/scripts/excalidraw-marks <file.excalidraw|file.svg>
+```
+
+`R:IN` keeps that point, `R:OUT` drops it, and `R:<text>` is a reply about it. Each mark reports the
+point it sits next to. Act on every mark before you redraw, and answer every `R:<text>` in chat.
