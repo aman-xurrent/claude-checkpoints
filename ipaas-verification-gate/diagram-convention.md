@@ -74,3 +74,126 @@ Green is a proposal, never applied code. Say that once in the header.
 | proposal headline | 12 | sans | `#047857` |
 | code | 11.5 | mono | `#e2e8f0` on dark, `#065f46` on green |
 | caption, locator, pill | 10.5 | sans | `#b0b7c3`, `#94a3b8`, `#ffffff` |
+
+## Geometry, as measured from the reference
+
+x positions are fixed. Copy them.
+
+| Part | x | Size / colour |
+| --- | --- | --- |
+| title | 40 | 22 sans `#0f172a` |
+| byline | 40 | 12 sans `#64748b` |
+| summary line | 40 | 12 sans `#334155` |
+| legend dots | 1438, 1524, 1610, 1696 | 11px ellipse, severity colour, filled |
+| legend labels | dot x + 18 | 12 sans, the severity colour |
+| trust rules | 40 | 11 sans `#94a3b8` |
+| status panel | 40, width 1770 | `#f8fafc` on `#cbd5e1`; its title at 56, 13 sans |
+| **the spine** | **300**, width 1 | `#94a3b8`, full height |
+| stage letter and name | 40 | 13 sans `#0f172a`, two lines |
+| stage ring | 291 | 16px ellipse, `#3b82f6` fill, `#1e3a5f` stroke |
+| stage description | 40 | 10.5 sans `#94a3b8` |
+| section header | 344 | 15 sans `#1e40af` |
+| section source file | 1500 | 11 sans `#94a3b8` |
+| section description | 344 | 12 sans `#64748b` |
+| finding dot | 362 | 11px ellipse, severity colour, filled |
+| finding statement | 384 | 12.5 sans `#475569` |
+| status pill | 1200, width 150, height 19 | `#15803d` or `#64748b` |
+| status pill label | ~1256 | 10.5 sans `#ffffff` |
+| finding locator | 1500 | 10.5 sans `#b0b7c3` |
+| code panel | 400, width 500 to 740 | `#0f172a` |
+| code caption | 414, panel y + 8 | 10.5 sans `#94a3b8` |
+| code body | 414, panel y + 24 | 11.5 **mono** `#e2e8f0` |
+| proposal panel | 400, width 320 to 730 | `#f0fdf4` on `#059669` |
+| `Reviewer suggests:` | 414, panel y + 8 | 12 sans `#047857` |
+| `The change` | 414, panel y + 27 | 10.5 sans `#059669` |
+| the diff | 414, panel y + 43 | 11.5 **mono** `#065f46` |
+
+Vertical rhythm inside one finding, from the statement's y: dot at +3, pill at -2, code panel at
++42, proposal panel at +190.
+
+## A finding, exactly as the reference draws it
+
+This is one real block, copied out of `jamf-review-findings.excalidraw`. Match this.
+
+**The statement**, 12.5 sans `#475569` at x=384, with an `#475569` dot at x=362:
+
+    #32  MINOR  ·  The concurrency key is routed through request_body.customer_id, which only Create Schedule sets. A missing
+    value removes the lock instead of failing.
+
+**The pill** at x=1200 on `#64748b`, label `DROPPED`. **The locator** at x=1500 in `#b0b7c3`:
+
+    Installed line 42, Sync lines 94-95
+
+**The code panel**, `#0f172a` at x=400. Caption in 10.5 `#94a3b8`, then the code verbatim in
+11.5 mono `#e2e8f0`. Note that the caption says what the code *does*, and the `#` comments inside the
+code say what is *wrong*:
+
+    the lock is keyed on a field only Create Schedule fills in
+
+    # App Installed line 42
+    - field_id: request_body
+      proc: '{"customer_id" => trigger_output&.dig(:customer_account_id)}'
+
+    # Synchronize Devices lines 94-95 -- the concurrency key reads that body
+    - field_id: job_context_identifier_path
+      fixed: customer_id            # absent value -> no lock, instead of a failure
+
+**The proposal panel**, `#f0fdf4` bordered `#059669` at x=400. Headline 12 `#047857`, the label
+`The change` in 10.5 `#059669`, then the diff in 11.5 mono `#065f46`:
+
+    Reviewer suggests:  point job_context_identifier_path at schedule_reference.
+
+    The change
+
+    # Sync lines 94-95, before:
+    - field_id: job_context_identifier_path
+      fixed: customer_id
+
+    # after:
+      fixed: schedule_reference
+    # every path that starts the runbook must then put schedule_reference in the body
+
+Read what that block gives the reader. The defect in one sentence, the real code that causes it with
+the offending line called out inline, and the exact edit that fixes it. Nothing sends them to an
+editor.
+
+## A section header and a stage marker, from the reference
+
+Stage marker at x=40 in 13 sans, two lines, with a ring on the spine at x=291 and a plain
+description under it in 10.5 `#94a3b8`:
+
+    A
+    INSTALL
+
+    the customer clicks Install on
+    the Jamf app
+
+Section header at x=344 in 15 `#1e40af`, its source file right-aligned at x=1500 in 11 `#94a3b8`,
+then one line at x=344 in 12 `#64748b` saying what the unit does:
+
+    App Installed runbook · create-schedule            App Installed · …-79ea-80ab-0d8ca8c6d6cd.yaml
+    Creates the recurring daily sync and one immediate catch-up run about a minute later.
+
+## The header, from the reference
+
+Title, byline, what must be done, the legend, then the rules that let the reader trust the content.
+That last block is not optional: it is how the reader knows the code is real.
+
+    Jamf CMDB solution — the 37 review findings on request #82428691, placed where each one bites
+
+    Reviewer: <name>, 8 Sep 2026 · reviewed the staging export against the Jamf connector contract
+    and the platform source · recommendation: hold the release
+
+    Must do before release: 3 blockers + 13 majors (#1–#16).   Minors and simplifications (#17–#37)
+    are optional.   Each finding carries the code it turns on, the reviewer's suggestion, and a
+    concrete change.   Severity key:            ● Blocker  ● Major  ● Minor  ● Simplification
+
+    Code is quoted from the working-tree solution at platform/tmp/dev-git/accounts/1/solution-01a0…,
+    line numbers as read there.
+    Every snippet line is verbatim from that file, except lines carrying … or -> , which are
+    shortened to fit, and the four request fields in #16, which come from the API.
+    Green boxes are proposals, not applied code. Every method used in them was checked against the
+    proc allow list in connector/lib/ipaas/connector/common/proc_rules/valid_methods_rule.rb.
+    Three are marked UNVERIFIED, where a platform capability still needs confirming.
+
+Then a status panel, `#f8fafc` on `#cbd5e1`, 1770 wide, saying where every finding stands today.
