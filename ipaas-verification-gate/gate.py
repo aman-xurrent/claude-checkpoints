@@ -884,6 +884,181 @@ def prove_one(proof, spec_patch, code_patch, base_sha, run_directory, index, log
     return {**record, "status": STATUS_PASS}
 
 
+EXAMPLE_DEFINITION = re.compile(r"""^\+\s*(?:it|specify|example)\s*\(?\s*(['"])(.+?)\1""")
+
+
+def added_examples(spec_patch):
+    """The example descriptions the change adds, per file.
+
+    An example that the change adds is the one the change is supposed to prove. If it passes with
+    the code reverted it proves nothing, and a file-wide check hides it: one vacuous example among
+    forty working ones still leaves the file red.
+
+    A description built by interpolation is skipped, because it cannot be matched against the
+    description rspec reports.
+    """
+    added, path = {}, None
+    for line in spec_patch.splitlines():
+        header = re.match(r"diff --git a/(.+?) b/(.+)$", line)
+        if header:
+            path = header.group(2)
+            continue
+        match = EXAMPLE_DEFINITION.match(line)
+        if path and match and "#{" not in match.group(2):
+            added.setdefault(path, set()).add(match.group(2))
+    return added
+
+
+def rspec_files(project, spec_files, json_path, log):
+    """One rspec invocation over several files. The sweep needs a per-example verdict across the
+    whole set, not one run per file, so the red state is built once and read once."""
+    command = ["bundle", "exec", "rspec", *spec_files, "--format", "json", "--out", str(json_path), "--order", "defined"]
+    log("$ " + " ".join(command))
+    completed = subprocess.run(
+        command, cwd=str(GATE_WORKTREE / project), env=prover_environment(),
+        capture_output=True, text=True, timeout=RSPEC_TIMEOUT_SECONDS,
+    )
+    tail = "\n".join((completed.stdout + completed.stderr).strip().splitlines()[-8:])
+    log(f"exit {completed.returncode}\n{tail}")
+    report = read_json(json_path, default={}) or {}
+    return report, completed.returncode
+
+
+def sweep_targets(paths, declared, log):
+    """Every changed example file the declaration did not name. Fixtures and spec helpers are not
+    example files, so they stay on the code side and get reverted with the rest of the change."""
+    targets = []
+    for path in paths:
+        if not is_example_path(path) or path in declared:
+            continue
+        if is_system_spec(path):
+            log(f"sweep: {path} skipped, system specs run in the CI tier")
+            continue
+        if project_of(path) is None:
+            log(f"sweep: {path} skipped, not under {RUBY_PROJECTS}")
+            continue
+        targets.append(path)
+    return targets
+
+
+def sweep_undeclared(spec_patch, code_patch, base_sha, paths, declared, run_directory, log):
+    """Run every changed example file that the declaration left out, with the code reverted.
+
+    A file that is still green without the change proves nothing about the change. This is the same
+    question prove_one asks of a declared example, asked of the files nobody declared.
+
+    The revert is the whole code diff, so this finds a file that never depended on the change at
+    all. It does not find a spec whose own logic is not load-bearing, nor one that rebuilds its
+    expected value from the expression it is checking. Both stay green here and both are real.
+    """
+    targets = sweep_targets(paths, declared, log)
+    if not targets:
+        return []
+    if not code_patch.strip():
+        return [{"spec_file": path, "status": STATUS_NOT_APPLICABLE,
+                 "reason": "the diff has no non-spec hunks to revert"} for path in targets]
+
+    log(f"--- sweep: {len(targets)} changed example file(s) the declaration did not name")
+    added = added_examples(spec_patch)
+    log(f"sweep: the change adds {sum(len(each) for each in added.values())} named example(s)")
+    reset_gate_worktree(base_sha)
+    apply_patch(spec_patch, "spec hunks only", log)
+
+    records = []
+    by_project = {}
+    for path in targets:
+        if is_javascript_test(path):
+            records.append(sweep_one_javascript(path, run_directory, log))
+            continue
+        if not (GATE_WORKTREE / path).exists():
+            records.append({"spec_file": path, "status": STATUS_NOT_APPLICABLE,
+                            "reason": "the change deletes this file, so there is nothing to run"})
+            continue
+        by_project.setdefault(project_of(path), []).append(path)
+
+    for project, project_paths in sorted(by_project.items()):
+        records += sweep_project(project, project_paths, added, run_directory, log)
+    return records
+
+
+def sweep_project(project, paths, added, run_directory, log):
+    json_directory = run_directory / f"sweep-{project}"
+    json_directory.mkdir(exist_ok=True)
+    relative = [path.split("/", 1)[1] for path in paths]
+    report, exit_code = rspec_files(project, relative, json_directory / "red.json", log)
+
+    if not report:
+        return [{"spec_file": path, "status": STATUS_ERROR,
+                 "reason": f"rspec wrote no report for the sweep (exit {exit_code})"} for path in paths]
+
+    counts = {path: {"examples": 0, "failures": 0, "added": 0, "still_green": []} for path in paths}
+    for example in report.get("examples", []):
+        path = sweep_owner(example.get("file_path", ""), project, counts)
+        if path is None:
+            continue
+        count = counts[path]
+        count["examples"] += 1
+        if example.get("status") == "failed":
+            count["failures"] += 1
+        description = matching_added(example.get("full_description", ""), added.get(path, set()))
+        if description is None:
+            continue
+        count["added"] += 1
+        if example.get("status") == "passed":
+            count["still_green"].append(description)
+
+    errors_outside = (report.get("summary") or {}).get("errors_outside_of_examples_count", 0)
+    return [sweep_record(path, counts[path], errors_outside, len(paths)) for path in paths]
+
+
+def matching_added(full_description, descriptions):
+    """rspec reports the context chain and the description together, so the added description is a
+    suffix of it. The longest match wins, so a description that is a tail of a longer one does not
+    claim the longer one's result."""
+    matches = [each for each in descriptions if full_description.endswith(each)]
+    return max(matches, key=len) if matches else None
+
+
+def sweep_owner(file_path, project, counts):
+    """rspec reports a file path relative to the project directory, with a ./ prefix."""
+    candidate = f"{project}/{file_path.lstrip('.').lstrip('/')}"
+    return candidate if candidate in counts else None
+
+
+def sweep_record(path, count, errors_outside, file_count):
+    record = {"spec_file": path, "runner": "rspec", "red": count}
+    if count["still_green"]:
+        listed = "; ".join(f'"{each}"' for each in sorted(count["still_green"])[:5])
+        return {**record, "status": STATUS_VACUOUS,
+                "reason": f"{len(count['still_green'])} of the {count['added']} example(s) this change adds "
+                          f"pass with the change reverted, so they prove nothing: {listed}"}
+    if count["failures"] >= 1:
+        return {**record, "status": STATUS_PASS}
+    if count["examples"] == 0:
+        if errors_outside >= 1:
+            return {**record, "status": STATUS_PASS,
+                    "reason": "the file does not load with the change reverted, so it depends on the change"}
+        return {**record, "status": STATUS_ERROR,
+                "reason": "rspec ran no example from this file and reported no load error"}
+    if errors_outside >= 1 and file_count > 1:
+        return {**record, "status": STATUS_ERROR,
+                "reason": "another file in the sweep failed to load, so this result is not trustworthy"}
+    return {**record, "status": STATUS_VACUOUS,
+            "reason": f"all {count['examples']} example(s) pass with the change reverted, so the file does not prove the change"}
+
+
+def sweep_one_javascript(path, run_directory, log):
+    project = project_of(path)
+    json_directory = run_directory / f"sweep-{Path(path).stem}"
+    json_directory.mkdir(exist_ok=True)
+    result = vitest(project, path.split("/", 1)[1], "", "defined", json_directory / "red.json", log)
+    record = {"spec_file": path, "runner": "vitest", "red": result}
+    if is_red(result):
+        return {**record, "status": STATUS_PASS}
+    return {**record, "status": STATUS_VACUOUS,
+            "reason": "every test in the file passes with the change reverted, so the file does not prove the change"}
+
+
 def prove(run_directory):
     run_directory = Path(run_directory)
     log_path = run_directory / LOG_FILE_NAME
@@ -897,7 +1072,7 @@ def prove(run_directory):
     patch = (run_directory / PATCH_FILE_NAME).read_text()
     spec_patch, code_patch, _ = split_patch(patch)
     findings = {"id": meta.get("id"), "status": STATUS_PENDING, "base_sha": meta.get("base_sha"),
-                "patch_sha": meta.get("patch_sha"), "started_at": now_iso(), "proofs": [],
+                "patch_sha": meta.get("patch_sha"), "started_at": now_iso(), "proofs": [], "sweep": [],
                 "pid": os.getpid(), "boot": boot_time()}
     write_json(run_directory / FINDINGS_FILE_NAME, findings)
 
@@ -909,7 +1084,12 @@ def prove(run_directory):
         try:
             for index, proof in enumerate(declaration.get("proofs", []), start=1):
                 findings["proofs"].append(prove_one(proof, spec_patch, code_patch, meta["base_sha"], run_directory, index, log))
-            findings["status"] = worst_status([each["status"] for each in findings["proofs"]])
+            declared = {each.get("spec_file") for each in declaration.get("proofs", [])}
+            findings["sweep"] = sweep_undeclared(
+                spec_patch, code_patch, meta["base_sha"], meta.get("paths", []), declared, run_directory, log)
+            write_json(run_directory / FINDINGS_FILE_NAME, findings)
+            findings["status"] = worst_status(
+                [each["status"] for each in findings["proofs"]] + [each["status"] for each in findings["sweep"]])
         except Exception as error:  # the findings file must always reach a final state
             log(f"prover error: {error!r}")
             findings["status"] = STATUS_ERROR
@@ -958,7 +1138,9 @@ def stop_message(root):
         elif code_paths and meta.get("patch_sha") != patch_digest(snapshot_patch(root)):
             messages.append(f"proof {findings.get('id')} finished {status} but the diff changed since it ran. It is stale. Redeclare to re-prove.")
         elif status != STATUS_PASS:
-            reasons = "; ".join(f"{each['spec_file']}: {each.get('reason', each['status'])}" for each in findings.get("proofs", []) if each["status"] != STATUS_PASS)
+            reasons = "; ".join(f"{each['spec_file']}: {each.get('reason', each['status'])}"
+                                for each in findings.get("proofs", []) + findings.get("sweep", [])
+                                if each["status"] != STATUS_PASS)
             messages.append(f"proof {findings.get('id')} finished {status}. {reasons or findings.get('reason', '')}")
     if code_paths:
         review_message = review_stop_message(root)
@@ -1007,7 +1189,7 @@ def surface():
             continue
         surfaced.add(run_directory.name)
         details = "; ".join(f"{each['spec_file']} -> {each['status']}" + (f" ({each['reason']})" if each.get("reason") else "")
-                            for each in findings.get("proofs", []))
+                            for each in findings.get("proofs", []) + findings.get("sweep", []))
         lines.append(f"gate: proof {run_directory.name} finished {findings['status']}. {details}")
     if lines:
         write_json(marker_path, sorted(surfaced))
@@ -2206,11 +2388,43 @@ def link_worktree(root, quiet=False):
         actions += ensure_symlink(binaries / name, LOCAL_SKILLS_DIRECTORY / name)
     actions += ensure_copy(root / LOCAL_PROTOCOL_FILE.name, LOCAL_PROTOCOL_FILE, refresh=True)
     actions += ensure_copy(root / LOCAL_SETTINGS_FILE, MAIN_REPOSITORY / LOCAL_SETTINGS_FILE)
+    actions += ensure_serena_projects(root)
     actions += ensure_fence(root)
     actions += ensure_exclude_entries(root)
     if not quiet:
         print("\n".join(actions) if actions else f"{root}: already linked")
     return actions
+
+
+def ensure_serena_projects(root):
+    """Give the worktree its own Serena project for each Ruby project.
+
+    Serena indexes one project per Ruby project, not one per repository, and it keys a project by
+    absolute path. A worktree is a different path, so it starts with no project and the rule to call
+    find_referencing_symbols cannot be followed there.
+
+    Serena auto-generates a config for an unknown path, but it guesses the language servers. Copying
+    the main checkout's project.yml keeps ruby and typescript, and the name stays unique per worktree
+    so two worktrees never collide in the Serena registry. Only project.yml is copied: the cache and
+    the memories belong to the checkout that built them.
+    """
+    if root == MAIN_REPOSITORY:
+        return []
+    actions = []
+    for project in RUBY_PROJECTS:
+        source = MAIN_REPOSITORY / project / ".serena" / "project.yml"
+        destination = root / project / ".serena" / "project.yml"
+        if not source.exists() or not (root / project).is_dir() or destination.exists():
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(serena_project_text(source.read_text(), f"ipaas-{project}-{root.name}"))
+        actions.append(f"seeded {destination} for Serena")
+    return actions
+
+
+def serena_project_text(text, name):
+    replaced, count = re.subn(r'(?m)^project_name:.*$', f'project_name: "{name}"', text, count=1)
+    return replaced if count else f'project_name: "{name}"\n{text}'
 
 
 def ensure_symlink(link, target):
@@ -2798,6 +3012,11 @@ def pr_section():
         lines.append(f"**Revert proof** `{findings.get('id')}`: **{findings.get('status')}**")
         for proof in findings.get("proofs", []):
             lines.append(f"- `{proof['spec_file']}` -e `{proof.get('example', '')}`: {proof['status']}" + (f" ({proof['reason']})" if proof.get("reason") else ""))
+        sweep = findings.get("sweep", [])
+        if sweep:
+            lines.append(f"**Undeclared changed example files** ({len(sweep)}), run with the change reverted:")
+            for each in sweep:
+                lines.append(f"- `{each['spec_file']}`: {each['status']}" + (f" ({each['reason']})" if each.get("reason") else ""))
     else:
         lines.append("**Revert proof**: none recorded.")
     lines.append("")

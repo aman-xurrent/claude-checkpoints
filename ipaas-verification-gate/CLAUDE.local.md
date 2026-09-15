@@ -14,6 +14,20 @@ helpers and support files count as code for the proof: the red run reverts them 
 5. Never run the proof yourself, never stash or edit the main tree to test a revert. The prover
    uses `~/work/ipaas_worktrees/gate` with its own databases.
 
+## Every changed spec file is swept, declared or not
+
+After the declared proofs, the prover runs every other example file your change touched, with the
+code reverted. A file that is still green without the change gets `vacuous` and the whole run fails.
+Declaring one spec file no longer hides the rest. You do not declare the sweep and you cannot opt out
+of it.
+
+Read what the sweep proves, and what it does not:
+
+- It proves the file depends on **something** in the diff.
+- It does not prove the file tests the **mechanism it claims to guard**. A spec whose own narrowing
+  logic never fires, and a spec that rebuilds its expected value from the same expression it checks,
+  both stay green here. Removing the specific guard and re-running is still your job, not the gate's.
+
 `pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer.
 There is no skip for you. No environment variable, no `--no-verify`, no hook path change, no edit to the
 gate: those commands are denied to your Bash tool. Only the user can let one push through, from their own
@@ -47,8 +61,15 @@ you claim a change is complete, use the tools that see the whole change:
   every textual reference across all three Ruby projects and the TypeScript, classified as
   code, spec, symbol (mocks such as `receive(:name)`), string literal, comment, or definition,
   plus the dynamic dispatch sites that make the list unprovable.
-- Serena `find_referencing_symbols` (MCP tool, `activate_project` first): the exact call sites
-  with their enclosing method, which text search cannot distinguish from mocks.
+- Serena `find_referencing_symbols` (MCP tool): the exact call sites with their enclosing
+  method, which text search cannot distinguish from mocks.
+
+  **Activate the Ruby project, not the worktree root.** Serena indexes one project per Ruby
+  project. Call `activate_project` with the absolute path of the project that holds the symbol,
+  for example `<worktree>/platform`, `<worktree>/connector` or `<worktree>/connector-sdk`.
+  The worktree root is not a Serena project and activating it indexes nothing useful.
+  Each worktree has its own project config, seeded by `gate.py link-worktree`.
+  A symbol that crosses projects needs one `activate_project` call per project.
 - Every Edit or Write that removes or renames a definition injects a `gate impact:` block into
   your context with the remaining references and the dynamic dispatch count. Act on it before
   the next edit. Do not treat it as noise.
