@@ -41,9 +41,18 @@ def window_alive(window_id):
     return bool(window_id) and window_id in tmux("list-windows", "-a", "-F", "#{window_id}", check=False).split()
 
 
+def window_name_of(window_id):
+    return tmux("display-message", "-p", "-t", window_id, "#{window_name}", check=False).strip()
+
+
 def find_live_window(session, name, preferred_id=None):
-    """A window with a live Claude: the remembered id first, then any window of that name."""
-    if preferred_id and window_alive(preferred_id) and pane_is_claude(preferred_id):
+    """A window with a live Claude: the remembered id first, then any window of that name.
+
+    The remembered id must still carry the expected name. tmux reuses an id after a window closes,
+    so a stale id can land on someone else's Claude session and the daemon would then type a prompt
+    for this pull request into it."""
+    if (preferred_id and window_alive(preferred_id) and pane_is_claude(preferred_id)
+            and window_name_of(preferred_id) == name):
         return preferred_id
     if not has_session(session):
         return None

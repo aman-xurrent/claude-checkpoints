@@ -604,16 +604,24 @@ def restart(arguments):
 
 
 def status():
+    config = load_config()
     states = state_store.all_states()
     if not states:
         print(f"no registered pull requests under {state_store.STATE_ROOT}")
         return
-    print(f"{'repo':12} {'pr':>6} {'phase':>5} {'status':20} {'handoff':20} {'window':8} {'session':10} branch")
+    print(f"{'repo':12} {'pr':>6} {'phase':>5} {'status':20} {'handoff':20} {'window':20} {'session':10} branch")
     for each in states:
         session_id = each.get("claude_session_id") or "-"
-        alive = "" if each.get("status") == STATUS_DONE else (" live" if tmux.window_alive(each.get("window_id")) else " dead")
+        if each.get("status") == STATUS_DONE:
+            window, alive = each.get("window_id") or "-", ""
+        else:
+            found = tmux.find_live_window(session_name(config, each), f"pr{each['pr']}", each.get("window_id"))
+            window = found or (each.get("window_id") or "-")
+            alive = " live" if found else " dead"
+            if found and found != each.get("window_id"):
+                alive = f" live(was {each.get('window_id')})"
         print(f"{each['repo']:12} {each['pr']:>6} {each.get('phase', '?'):>5} {each.get('status', '?'):20} "
-              f"{(each.get('handoff_at') or '')[:19]:20} {(each.get('window_id') or '-') + alive:8} {session_id[:8]:10} {each.get('branch', '')}")
+              f"{(each.get('handoff_at') or '')[:19]:20} {(window + alive):20} {session_id[:8]:10} {each.get('branch', '')}")
     if state_store.paused():
         print("PAUSED")
 
