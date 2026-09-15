@@ -81,13 +81,15 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation", "pr-diagram")
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation",
+                   "pr-diagram", "pr-create")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
                          "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
                          "**/.claude/bin/review-record", "**/.claude/bin/deviation", "**/.claude/bin/pr-diagram",
+                         "**/.claude/bin/pr-create",
                          "**/.claude/deviations/",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
@@ -271,7 +273,7 @@ GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".cla
                          ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
                           ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
-                          ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram",
+                          ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram", ".claude/bin/pr-create",
                           "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
@@ -283,8 +285,12 @@ COMMENT_WRAPPER = ".claude/bin/pr-comment"
 # be lost. Creating the pull request still writes a whole body, which is phase 1 and is allowed.
 DESCRIPTION_WRAPPER = ".claude/bin/pr-phase"
 REVIEW_WRAPPER = ".claude/bin/review-record"
+CREATE_WRAPPER = ".claude/bin/pr-create"
 GUARD_DESCRIPTION_WRITING = (
     re.compile(r"\bgh\s+pr\s+edit\b[^|;]*--body(-file)?\b"),
+    # A body written at creation used to escape every check, which is how a description grew to
+    # several hundred lines of prose before any rule could see it.
+    re.compile(r"\bgh\s+pr\s+create\b[^|;]*--body(-file)?\b"),
     re.compile(r"\bgh\s+api\b[^|;]*\bpulls/\d+\b[^|;]*(-X\s*(PATCH|POST)|--method\s*(PATCH|POST))[^|;]*\bbody\b"),
 )
 GUARD_COMMENT_POSTING = (
@@ -2091,6 +2097,13 @@ def guard_segment(segment):
         return ("a pull request comment must go through `.claude/bin/pr-comment --pr N --title \"...\" --body-file <path>`, "
                 "which stamps who posted it and folds the content into a collapsed block. A raw post is indistinguishable "
                 "from one the account holder wrote.")
+    if re.search(r"\bgh\s+pr\s+create\b", segment) and CREATE_WRAPPER not in segment \
+            and any(pattern.search(segment) for pattern in GUARD_DESCRIPTION_WRITING):
+        return ("a pull request is not created with a description. Use "
+                "`.claude/bin/pr-create --title \"...\" --request <id>`, which opens the draft with one link "
+                "and no prose, then add `## Phase 1` with `.claude/bin/pr-phase`, which takes a diagram. "
+                "A body written at creation escaped every check, which is how a description grew to several "
+                "hundred lines nobody reads.")
     if DESCRIPTION_WRAPPER not in segment and any(pattern.search(segment) for pattern in GUARD_DESCRIPTION_WRITING):
         return ("the pull request description must be changed through "
                 "`.claude/bin/pr-phase --pr N --phase P --body-file <path>`, which reads the live description and "

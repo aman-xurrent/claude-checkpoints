@@ -235,6 +235,16 @@ be read back. The `.excalidraw` source is what the user opens to edit and to mar
 The user answers a diagram by adding marks to it. Read them with
 `~/personal/scripts/excalidraw-marks`, from the svg or from the source. Never read the picture.
 
+### Creating the pull request
+
+`.claude/bin/pr-create --title "Request#<id> <subject>" --request <id>` opens the draft. The body
+starts as one link to the request and nothing else. Every section after that goes through
+`pr-phase`, which takes a diagram and refuses prose.
+
+The guard refuses `gh pr create --body` and `--body-file`. A description written at creation used to
+escape every check, because the guard only watched `gh pr edit`. That is how a body reached several
+hundred lines nobody reads.
+
 ### The only text allowed
 
 Machine output, inside a `<details>` fold in that phase's own section: `gate.py pr-section` verbatim,

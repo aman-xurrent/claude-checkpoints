@@ -194,8 +194,10 @@ wrote yourself goes in the body.
    commit, amend that one commit.
 3. `git push -u origin HEAD`.
 4. The PR.
-   - Phase 1 creates it as a draft:
-     `GH_HOST=git.4me.com gh pr create --draft --title "Request#<id> <subject>" --body-file <file>`.
+   - Phase 1 creates it as a draft with `.claude/bin/pr-create --title "Request#<id> <subject>"
+     --request <id>`. The body starts as one link to the request and nothing else. A body written at
+     creation escaped every check, which is how a description grew to several hundred lines of prose,
+     so the guard refuses `gh pr create --body` and `--body-file`.
      Then set the request's `review` custom field to the PR URL
      (`.claude/bin/xurrent-api PATCH /requests/<id> '{"custom_fields":[{"id":"review","value":"<url>"}]}'`).
    - Every phase writes its `## Phase N` section with `.claude/bin/pr-phase`, which reads the live

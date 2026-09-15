@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Create the draft pull request for a phased request, with a body that holds no prose.
+
+    .claude/bin/pr-create --title "Request#81848811 Allow solution export even when broken" \
+        --request 81848811 [--base main] [--dry-run]
+
+The body starts as one link to the request and nothing else. Every phase section is added after
+that with `.claude/bin/pr-phase`, which accepts a diagram and refuses prose.
+
+A description written at creation time used to escape every check, because the guard only watched
+`gh pr edit`. That is how a pull request ended up with several hundred lines nobody reads.
+"""
+import argparse
+import re
+import subprocess
+import sys
+
+REQUEST_URL = "https://xurrent-support.xurrent.com/requests/{}"
+
+
+def gh(*arguments):
+    done = subprocess.run(["gh", *arguments], capture_output=True, text=True,
+                          env={**__import__("os").environ, "GH_HOST": "git.4me.com"})
+    if done.returncode != 0:
+        raise SystemExit(f"pr-create: gh {arguments[0]} failed: {done.stderr.strip()[:300]}")
+    return done.stdout.strip()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--request", required=True, help="the Xurrent request number")
+    parser.add_argument("--base", default="main")
+    parser.add_argument("--dry-run", action="store_true")
+    arguments, unknown = parser.parse_known_args()
+
+    banned = [flag for flag in unknown if flag.startswith("--body")]
+    if banned:
+        raise SystemExit("pr-create: a description is not written at creation. Create the pull request, "
+                         "then add `## Phase 1` with `.claude/bin/pr-phase`, which takes a diagram.")
+    if not re.fullmatch(r"\d+", arguments.request):
+        raise SystemExit("pr-create: --request wants the request number, digits only")
+
+    body = f"[Request#{arguments.request}]({REQUEST_URL.format(arguments.request)})\n"
+    print(f"pr-create: draft on {arguments.base}, title {arguments.title!r}")
+    print(f"  body: {body.strip()}")
+    if arguments.dry_run:
+        print("  dry run, nothing created")
+        return
+    url = gh("pr", "create", "--draft", "--base", arguments.base,
+             "--title", arguments.title, "--body", body)
+    print(f"  created {url}")
+    print("  now add the phase 1 diagram with `.claude/bin/pr-phase --pr <n> --phase 1 --body-file <file>`")
+
+
+if __name__ == "__main__":
+    main()
