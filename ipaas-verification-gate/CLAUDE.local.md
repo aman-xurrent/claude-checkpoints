@@ -206,6 +206,19 @@ One section per phase, in the order the phases happened:
 adds a new section with `--updated` instead of replacing its old one, so the record keeps what the
 phase first said and what changed after the review.
 
+### The reader never leaves the diagram
+
+Whatever the approver must read to understand the point or to make a decision is inside the drawing:
+the code quoted verbatim, what it does, what is wrong with it, and the proposed change. Never make
+them open an editor to look up a line number. A label that reads `solution_exporter.rb:15` and
+nothing else has failed. Show line 15.
+
+Follow `~/personal/scripts/gate/diagram-convention.md`. It is the written form of
+`~/.claude/excalidraw/jamf-review-findings.excalidraw`, which is the reference every diagram copies:
+one tall column on a vertical spine, stage markers in the left gutter, a dark panel holding the
+verbatim code with `#` comments pointing at the defect, and a green panel holding the change as a
+before/after diff. Green is a proposal, never applied code.
+
 ### What each phase diagram must carry
 
 All four, in one drawing with one spine. The Excalidraw rules in `~/.claude/CLAUDE.md` say how to
