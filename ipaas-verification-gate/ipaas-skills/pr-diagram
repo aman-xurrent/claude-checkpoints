@@ -16,12 +16,20 @@ import argparse
 import base64
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ASSET_PREFIX = "review-assets"
 HOST = "git.4me.com"
+PNG_SCALE = 3
+# A light diagram reads as a wall of white next to a code editor. Dark is the house style, and it is
+# checked rather than asked for: the light diagrams this replaced measured 0.82 and 0.94.
+MAX_MEAN_BRIGHTNESS = 0.35
+VIEWBOX = re.compile(r'viewBox="\s*[-\d.]+\s+[-\d.]+\s+([\d.]+)\s+([\d.]+)\s*"')
+SIZE_ATTRIBUTE = re.compile(r'\s(width|height)="[\d.]+(?:px)?"')
 
 
 def gh(*arguments, stdin=None):
@@ -85,26 +93,83 @@ def publish(repo, branch, files, message):
     return commit_sha, parent is None
 
 
+def logical_size(svg_text):
+    """The drawing's own size, from the viewBox. The Excalidraw export writes width and height at
+    twice that, so the file says 3580 for a 1790 wide drawing."""
+    found = VIEWBOX.search(svg_text)
+    if not found:
+        raise SystemExit("pr-diagram: the svg has no viewBox, so its scale cannot be read")
+    return float(found.group(1)), float(found.group(2))
+
+
+def normalise_svg(path):
+    """Rewrite the svg to 1x: width and height equal to the viewBox. Returns the logical size."""
+    text = Path(path).read_text()
+    width, height = logical_size(text)
+    head, _, rest = text.partition(">")
+    head = SIZE_ATTRIBUTE.sub("", head)
+    head = head.replace("<svg", f'<svg width="{width:g}" height="{height:g}"', 1)
+    Path(path).write_text(head + ">" + rest)
+    return width, height
+
+
+def render_png(svg_path, png_path, width):
+    """The png is always the svg at 3x, rendered here rather than exported by hand, so the two can
+    never disagree about what the diagram says."""
+    if not shutil.which("rsvg-convert"):
+        raise SystemExit("pr-diagram: rsvg-convert is not installed (brew install librsvg)")
+    done = subprocess.run(["rsvg-convert", "-w", str(int(round(width * PNG_SCALE))),
+                           "-o", str(png_path), str(svg_path)], capture_output=True, text=True)
+    if done.returncode != 0:
+        raise SystemExit(f"pr-diagram: rsvg-convert failed: {done.stderr.strip()[:200]}")
+
+
+def mean_brightness(png_path):
+    if not shutil.which("magick"):
+        return None
+    done = subprocess.run(["magick", str(png_path), "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"],
+                          capture_output=True, text=True)
+    try:
+        return float(done.stdout.strip())
+    except ValueError:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--name", required=True, help="file stem, for example phase-1 or phase-1-updated")
     parser.add_argument("--slug")
-    parser.add_argument("--png", required=True)
     parser.add_argument("--svg", required=True)
-    parser.add_argument("--source", help="the .excalidraw file, so the user can edit it and mark it")
+    parser.add_argument("--png", help="optional; by default the png is rendered from the svg at 3x")
     parser.add_argument("--alt", help="alt text for the image")
-    arguments = parser.parse_args()
+    parser.add_argument("--allow-light", action="store_true", help=argparse.SUPPRESS)
+    arguments, unknown = parser.parse_known_args()
 
-    for flag in ("png", "svg"):
-        if not Path(getattr(arguments, flag)).is_file():
-            raise SystemExit(f"pr-diagram: --{flag} {getattr(arguments, flag)} does not exist")
+    if any(flag.startswith("--source") or flag.startswith("--excalidraw") for flag in unknown):
+        raise SystemExit("pr-diagram: the .excalidraw source is not published. Only the png and the svg "
+                         "go on the branch. Keep the source in ~/.claude/excalidraw/.")
+    if not Path(arguments.svg).is_file():
+        raise SystemExit(f"pr-diagram: --svg {arguments.svg} does not exist")
+
+    work = Path(tempfile.mkdtemp(prefix="pr-diagram-"))
+    svg_path = work / f"{arguments.name}.svg"
+    shutil.copy2(arguments.svg, svg_path)
+    width, height = normalise_svg(svg_path)
+    png_path = work / f"{arguments.name}.png"
+    render_png(svg_path, png_path, width)
+    brightness = mean_brightness(png_path)
+    print(f"pr-diagram: svg {width:g}x{height:g} at 1x, png at {PNG_SCALE}x "
+          f"({int(width * PNG_SCALE)}x{int(height * PNG_SCALE)})"
+          + (f", mean brightness {brightness:.3f}" if brightness is not None else ""))
+    if brightness is not None and brightness > MAX_MEAN_BRIGHTNESS and not arguments.allow_light:
+        raise SystemExit(f"pr-diagram: the diagram is light (mean brightness {brightness:.3f}, the limit is "
+                         f"{MAX_MEAN_BRIGHTNESS}). Diagrams are dark. Redraw it on the dark palette in "
+                         "~/personal/scripts/gate/diagram-convention.md.")
 
     repo = repository()
     branch = f"{ASSET_PREFIX}/{arguments.pr}-{arguments.slug or branch_slug()}"
-    files = [(f"{arguments.name}.png", arguments.png), (f"{arguments.name}.svg", arguments.svg)]
-    if arguments.source and Path(arguments.source).is_file():
-        files.append((f"{arguments.name}.excalidraw", arguments.source))
+    files = [(f"{arguments.name}.png", str(png_path)), (f"{arguments.name}.svg", str(svg_path))]
 
     sha, created = publish(repo, branch, files, f"{arguments.name} for pull request #{arguments.pr}")
     print(f"pr-diagram: {'created' if created else 'updated'} {branch} at {sha[:10]}")
@@ -113,13 +178,10 @@ def main():
 
     base = f"https://{HOST}/{repo}/blob/{branch}"
     alt = arguments.alt or arguments.name.replace("-", " ")
-    links = [f"[svg]({base}/{arguments.name}.svg?raw=1)"]
-    if arguments.source and Path(arguments.source).is_file():
-        links.append(f"[source]({base}/{arguments.name}.excalidraw?raw=1)")
     print("\n--- paste this into the phase section ---")
     print(f"![{alt}]({base}/{arguments.name}.png?raw=1)")
     print()
-    print(" · ".join(links))
+    print(f"[svg]({base}/{arguments.name}.svg?raw=1)")
 
 
 if __name__ == "__main__":

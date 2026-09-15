@@ -241,13 +241,12 @@ draw; this says what to draw.
 Draw with the Excalidraw MCP, never by hand-writing JSON. Export all three formats, then:
 
 ```
-.claude/bin/pr-diagram --pr <n> --name phase-1 \
-  --png out/phase-1.png --svg out/phase-1.svg --source out/phase-1.excalidraw
+.claude/bin/pr-diagram --pr <n> --name phase-1 --svg out/phase-1.svg
 ```
 
-It puts the files on `review-assets/<pr>-<slug>`, a branch that is never merged, and prints the
-markdown to paste. The png is what renders. The svg is the same drawing, scalable, and its text can
-be read back. The `.excalidraw` source is what the user opens to edit and to mark.
+Pass only the svg. `pr-diagram` normalises it to 1x, renders the png from it at 3x, checks the
+diagram is dark, and puts both on `review-assets/<pr>-<slug>`, a branch that is never merged. The
+`.excalidraw` source stays in `~/.claude/excalidraw/` and is never published.
 
 The user answers a diagram by adding marks to it. Read them with
 `~/personal/scripts/excalidraw-marks`, from the svg or from the source. Never read the picture.

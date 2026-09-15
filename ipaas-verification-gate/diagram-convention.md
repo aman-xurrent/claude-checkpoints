@@ -11,6 +11,61 @@ it; the proposed change. A reader must never have to open an editor to look up a
 
 A label that says `solution_exporter.rb:15` and nothing else has failed. Show line 15.
 
+## Dark, and what that changes
+
+Diagrams are dark. `jamf-review-findings.excalidraw` is the reference for **anatomy**: the column,
+the spine, the finding block, what goes in each panel. Its colours are from before this rule, so
+read its shape and use the palette below, not its colours.
+
+`pr-diagram` measures the rendered image and refuses one whose mean brightness is above 0.35. The
+light diagrams this replaced measured 0.82 and 0.94.
+
+| Part | Dark value | was |
+| --- | --- | --- |
+| page background | `#0b1220` | white |
+| title | `#f1f5f9` | `#0f172a` |
+| byline | `#94a3b8` | `#64748b` |
+| summary line | `#cbd5e1` | `#334155` |
+| trust rules | `#64748b` | `#94a3b8` |
+| status panel | `#111c33` on `#334155` | `#f8fafc` on `#cbd5e1` |
+| spine | `#475569` | `#94a3b8` |
+| stage letter and name | `#e2e8f0` | `#0f172a` |
+| stage ring | `#3b82f6` fill, `#1e3a5f` stroke | unchanged |
+| stage description | `#64748b` | `#94a3b8` |
+| section header | `#60a5fa` | `#1e40af` |
+| section source file | `#64748b` | `#94a3b8` |
+| section description | `#94a3b8` | `#64748b` |
+| finding statement | `#cbd5e1` | `#475569` |
+| blocker dot | `#f87171` | `#b91c1c` |
+| major dot | `#fbbf24` | `#b45309` |
+| minor dot | `#94a3b8` | `#475569` |
+| simplification dot | `#a78bfa` | `#7c3aed` |
+| status pill, stands | `#15803d` | unchanged |
+| status pill, dropped | `#475569` | `#64748b` |
+| pill label | `#ffffff` | unchanged |
+| finding locator | `#64748b` | `#b0b7c3` |
+| **code panel** | `#020617` on a `#1e293b` border | `#0f172a`, no border |
+| code caption | `#94a3b8` | unchanged |
+| code body | `#e2e8f0` | unchanged |
+| **proposal panel** | `#052e1a` on `#059669` | `#f0fdf4` on `#059669` |
+| `Reviewer suggests:` | `#34d399` | `#047857` |
+| `The change` | `#10b981` | `#059669` |
+| the diff | `#6ee7b7` | `#065f46` |
+
+The code panel needs its own border now, because a dark panel on a dark page has no edge without
+one. Everything else keeps its job: green is still the proposal, the pill is still the status.
+
+## Export
+
+Never export the png by hand. `pr-diagram` renders it from the svg, so the two can never disagree
+about what the diagram says.
+
+- **svg at 1x.** The Excalidraw export writes `width` and `height` at twice the `viewBox`, so a 1790
+  wide drawing is written as 3580. `pr-diagram` rewrites them to match the viewBox.
+- **png at 3x**, rendered with `rsvg-convert` from that 1x svg.
+- **The `.excalidraw` source never goes on the branch.** Only the png and the svg. Keep the source in
+  `~/.claude/excalidraw/`. `pr-diagram` refuses a `--source` flag.
+
 ## Shape
 
 One tall column. A 1px vertical spine (`#94a3b8`) at x=300 running the full height. Content to the
