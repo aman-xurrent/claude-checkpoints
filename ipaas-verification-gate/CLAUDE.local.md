@@ -111,6 +111,10 @@ file exists and every line is inside it, so an invented source is refused. A ski
 records an empty list. `.claude/bin/review-record --section` prints all three lists as markdown for the
 pull request.
 
+**Worked examples: `~/personal/scripts/gate/examples/review-items.md`.** Real items that were acted
+on, what a useless item looks like even though the gate accepts it, and the same file covers the
+commit message shape.
+
 Judge scope by one rule. A pre-existing problem that the change touches belongs in this pull request. A
 pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
 request. "Pre-existing" alone is never a reason to leave it.
