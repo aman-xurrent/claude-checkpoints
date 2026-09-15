@@ -884,7 +884,7 @@ def prove_one(proof, spec_patch, code_patch, base_sha, run_directory, index, log
     return {**record, "status": STATUS_PASS}
 
 
-EXAMPLE_DEFINITION = re.compile(r"""^\+\s*(?:it|specify|example)\s*\(?\s*(['"])(.+?)\1""")
+EXAMPLE_DEFINITION = re.compile(r"""^([-+])\s*(?:it|test|specify|example)\s*\(?\s*(['"])(.+?)\2""")
 
 
 def added_examples(spec_patch):
@@ -894,19 +894,25 @@ def added_examples(spec_patch):
     the code reverted it proves nothing, and a file-wide check hides it: one vacuous example among
     forty working ones still leaves the file red.
 
+    A description that the patch both removes and adds was moved or reindented rather than written,
+    so it is not treated as new. Without that, reindenting a block would demand that every example
+    in it fail with the change reverted, and specs that are fine would read as vacuous.
+
     A description built by interpolation is skipped, because it cannot be matched against the
-    description rspec reports.
+    description the runner reports.
     """
-    added, path = {}, None
+    seen, path = {}, None
     for line in spec_patch.splitlines():
         header = re.match(r"diff --git a/(.+?) b/(.+)$", line)
         if header:
             path = header.group(2)
             continue
         match = EXAMPLE_DEFINITION.match(line)
-        if path and match and "#{" not in match.group(2):
-            added.setdefault(path, set()).add(match.group(2))
-    return added
+        if path and match and "#{" not in match.group(3):
+            sign, description = match.group(1), match.group(3)
+            seen.setdefault(path, {}).setdefault(description, set()).add(sign)
+    return {path: {description for description, signs in descriptions.items() if signs == {"+"}}
+            for path, descriptions in seen.items()}
 
 
 def rspec_files(project, spec_files, json_path, log):
@@ -966,9 +972,10 @@ def sweep_undeclared(spec_patch, code_patch, base_sha, paths, declared, run_dire
 
     records = []
     by_project = {}
+
     for path in targets:
         if is_javascript_test(path):
-            records.append(sweep_one_javascript(path, run_directory, log))
+            records.append(sweep_one_javascript(path, added, run_directory, log))
             continue
         if not (GATE_WORKTREE / path).exists():
             records.append({"spec_file": path, "status": STATUS_NOT_APPLICABLE,
@@ -1047,16 +1054,36 @@ def sweep_record(path, count, errors_outside, file_count):
             "reason": f"all {count['examples']} example(s) pass with the change reverted, so the file does not prove the change"}
 
 
-def sweep_one_javascript(path, run_directory, log):
+def sweep_one_javascript(path, added, run_directory, log):
     project = project_of(path)
     json_directory = run_directory / f"sweep-{Path(path).stem}"
     json_directory.mkdir(exist_ok=True)
-    result = vitest(project, path.split("/", 1)[1], "", "defined", json_directory / "red.json", log)
-    record = {"spec_file": path, "runner": "vitest", "red": result}
+    json_path = json_directory / "red.json"
+    result = vitest(project, path.split("/", 1)[1], "", "defined", json_path, log)
+    still_green = javascript_still_green(read_json(json_path, default={}) or {}, added.get(path, set()))
+    record = {"spec_file": path, "runner": "vitest", "red": result, "still_green": still_green}
+    if still_green:
+        listed = "; ".join(f'"{each}"' for each in sorted(still_green)[:5])
+        return {**record, "status": STATUS_VACUOUS,
+                "reason": f"{len(still_green)} of the test(s) this change adds pass with the change reverted, "
+                          f"so they prove nothing: {listed}"}
     if is_red(result):
         return {**record, "status": STATUS_PASS}
     return {**record, "status": STATUS_VACUOUS,
             "reason": "every test in the file passes with the change reverted, so the file does not prove the change"}
+
+
+def javascript_still_green(report, descriptions):
+    green = []
+    for suite in report.get("testResults") or []:
+        for assertion in suite.get("assertionResults") or []:
+            if assertion.get("status") != "passed":
+                continue
+            name = assertion.get("fullName") or assertion.get("title") or ""
+            match = matching_added(name, descriptions)
+            if match:
+                green.append(match)
+    return green
 
 
 def prove(run_directory):
