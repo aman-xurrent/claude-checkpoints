@@ -17,13 +17,19 @@ helpers and support files count as code for the proof: the red run reverts them 
 ## Every changed spec file is swept, declared or not
 
 After the declared proofs, the prover runs every other example file your change touched, with the
-code reverted. A file that is still green without the change gets `vacuous` and the whole run fails.
-Declaring one spec file no longer hides the rest. You do not declare the sweep and you cannot opt out
-of it.
+code reverted. The verdict is per example: **every example your change adds must fail without your
+change.** One that still passes gets the file `vacuous` and the whole run fails. A file where the
+change adds no example must have at least one failure. Declaring one spec file no longer hides the
+rest, and one vacuous example among forty working ones no longer hides either. You do not declare
+the sweep and you cannot opt out of it.
+
+Ruby and JavaScript are both swept per example. An example whose description is built by
+interpolation is skipped, because it cannot be matched against the description the runner reports.
+An example the patch both removes and adds counts as moved, not added.
 
 Read what the sweep proves, and what it does not:
 
-- It proves the file depends on **something** in the diff.
+- It proves each example your change adds depends on **something** in the diff.
 - It does not prove the file tests the **mechanism it claims to guard**. A spec whose own narrowing
   logic never fires, and a spec that rebuilds its expected value from the same expression it checks,
   both stay green here. Removing the specific guard and re-running is still your job, not the gate's.
