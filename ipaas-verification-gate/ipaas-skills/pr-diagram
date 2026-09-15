@@ -125,9 +125,17 @@ def render_png(svg_path, png_path, width):
 
 
 def mean_brightness(png_path):
+    """How bright the image looks once it is on a page.
+
+    `-background white -alpha remove -alpha off` is not optional. rsvg-convert writes RGBA, and
+    `%[fx:mean]` over an RGBA image averages the alpha channel in with the colour, so a fully opaque
+    image reads as (true + 1) / 2. That made a pure black page measure 0.5 and no diagram could pass.
+    Flattening onto white also measures what a reader actually sees, so a diagram that looks dark
+    only because it is transparent is not mistaken for a dark one."""
     if not shutil.which("magick"):
         return None
-    done = subprocess.run(["magick", str(png_path), "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"],
+    done = subprocess.run(["magick", str(png_path), "-background", "white", "-alpha", "remove",
+                           "-alpha", "off", "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"],
                           capture_output=True, text=True)
     try:
         return float(done.stdout.strip())
