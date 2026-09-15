@@ -6,10 +6,29 @@ Open it before you draw.
 ## The rule that decides everything else
 
 **The reader never leaves the diagram.** Whatever they must read to understand the point or to make
-a decision is inside the drawing: the code itself, verbatim; what the code does; what is wrong with
-it; the proposed change. A reader must never have to open an editor to look up a line number.
+a decision is inside the drawing.
 
-A label that says `solution_exporter.rb:15` and nothing else has failed. Show line 15.
+**A pointer is not content.** That covers every kind of pointer, not only code:
+
+| Written | Why it fails | Write instead |
+| --- | --- | --- |
+| `solution_exporter.rb:15` | they must open an editor | the line itself, quoted |
+| "the decision in 4.1.d" | they must open the document | the decision, stated |
+| "see the plan for phase 3" | they must find the plan | what phase 3 does |
+| "per the request" | they must open the request | the sentence from the request |
+| "as the reviewer noted" | they must find the comment | what the reviewer said |
+| "the usual lock pattern" | they must know it already | the pattern, drawn |
+| "#16 above" | they must scroll and hold it | restate it here |
+
+If the reader has to go anywhere at all, including elsewhere in the same diagram, it has failed.
+Each finding stands alone.
+
+The test: hand the diagram to someone with no editor, no browser and no access to the repository.
+Can they understand the point and make the decision? If not, something is still a pointer.
+
+This is why a finding carries the code verbatim, one line of what it does, what is wrong with it,
+and the change as a before and after. Not because code is special, but because the code was the
+thing the reader would otherwise have gone looking for.
 
 ## Dark, and what that changes
 

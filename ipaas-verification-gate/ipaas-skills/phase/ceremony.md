@@ -136,10 +136,22 @@ phase first said and what changed after the review.
 
 ### The reader never leaves the diagram
 
-Whatever the approver must read to understand the point or to make a decision is inside the drawing:
-the code quoted verbatim, what it does, what is wrong with it, and the proposed change. Never make
-them open an editor to look up a line number. A label that reads `solution_exporter.rb:15` and
-nothing else has failed. Show line 15.
+Whatever the approver must read to understand the point or to make a decision is inside the drawing.
+
+**A pointer is not content**, and that covers every pointer, not only code:
+
+| Written | Write instead |
+| --- | --- |
+| `solution_exporter.rb:15` | the line itself, quoted |
+| "the decision in 4.1.d" | the decision, stated |
+| "see the plan for phase 3" | what phase 3 does |
+| "per the request" | the sentence from the request |
+| "as the reviewer noted" | what the reviewer said |
+| "#16 above" | restate it here |
+
+The test: someone with no editor, no browser and no access to the repository must be able to
+understand the point and make the decision. If they have to go anywhere, including elsewhere in the
+same diagram, it has failed. Each finding stands alone.
 
 Follow `~/personal/scripts/gate/diagram-convention.md`. It is the written form of
 `~/.claude/excalidraw/jamf-review-findings.excalidraw`, which is the reference every diagram copies:
