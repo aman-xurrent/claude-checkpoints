@@ -187,3 +187,71 @@ reading the picture:
 
 `R:IN` keeps that point, `R:OUT` drops it, and `R:<text>` is a reply about it. Each mark reports the
 point it sits next to. Act on every mark before you redraw, and answer every `R:<text>` in chat.
+
+## The pull request description is diagrams, not prose
+
+A phase section is a diagram. It is never a description. Prose in a pull request body turns into
+filler that nobody reads, so the tool refuses it: `pr-phase` rejects a section with no image, and
+rejects any line outside a `<details>` fold that is not the image or its links.
+
+One section per phase, in the order the phases happened:
+
+```
+## Phase 1
+## Phase 1 (updated)
+## Phase 2
+```
+
+`## Phase N` is written by `.claude/bin/pr-phase --phase N`. A phase that comes back after review
+adds a new section with `--updated` instead of replacing its old one, so the record keeps what the
+phase first said and what changed after the review.
+
+### What each phase diagram must carry
+
+All four, in one drawing with one spine. The Excalidraw rules in `~/.claude/CLAUDE.md` say how to
+draw; this says what to draw.
+
+1. **What the phase changed**, each step labelled with its `file:line`.
+2. **The call path the change runs through**: entry point, every hop in call order, the exit, each
+   with `file:line`. No step is summarised as "then it processes".
+3. **Design against build**, for an interface phase: the measured deltas from `gate.py figma-compare`,
+   as a zoom-in panel anchored to the element they belong to.
+4. **What is still open**: deliberate differences and out-of-scope items in a marked region, so the
+   user can answer with `R:IN` or `R:OUT` on the drawing itself.
+
+### Publishing a diagram
+
+Draw with the Excalidraw MCP, never by hand-writing JSON. Export all three formats, then:
+
+```
+.claude/bin/pr-diagram --pr <n> --name phase-1 \
+  --png out/phase-1.png --svg out/phase-1.svg --source out/phase-1.excalidraw
+```
+
+It puts the files on `review-assets/<pr>-<slug>`, a branch that is never merged, and prints the
+markdown to paste. The png is what renders. The svg is the same drawing, scalable, and its text can
+be read back. The `.excalidraw` source is what the user opens to edit and to mark.
+
+The user answers a diagram by adding marks to it. Read them with
+`~/personal/scripts/excalidraw-marks`, from the svg or from the source. Never read the picture.
+
+### The only text allowed
+
+Machine output, inside a `<details>` fold in that phase's own section: `gate.py pr-section` verbatim,
+and `.claude/bin/review-record --section`. Both are generated evidence with sources. Nothing you
+wrote yourself goes in the body.
+
+```
+## Phase 6
+
+![Phase 6: the runbook card](https://git.4me.com/4me/ipaas/blob/review-assets/1027-runbook-view/phase-6.png?raw=1)
+
+[svg](…/phase-6.svg?raw=1) · [source](…/phase-6.excalidraw?raw=1)
+
+<details><summary>Verification and review items</summary>
+
+…gate.py pr-section output, verbatim…
+…review-record --section output…
+
+</details>
+```

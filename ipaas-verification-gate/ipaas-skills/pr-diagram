@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Publish one phase diagram and print the markdown for its pull request section.
+
+    .claude/bin/pr-diagram --pr 1027 --name phase-1 \
+        --png out/phase-1.png --svg out/phase-1.svg --source out/phase-1.excalidraw
+
+The files go on the branch `review-assets/<pr>-<slug>`, which is never merged. The slug comes from
+the branch name unless `--slug` is given. The png is what renders in the description. The svg is the
+same drawing, scalable, and its text can be read back: the user answers a diagram by adding `R:IN`,
+`R:OUT` or `R:<text>` marks, and `~/personal/scripts/excalidraw-marks` reads them from the svg or
+from the source file.
+
+Nothing here touches the pull request branch or main.
+"""
+import argparse
+import base64
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ASSET_PREFIX = "review-assets"
+HOST = "git.4me.com"
+
+
+def gh(*arguments, stdin=None):
+    done = subprocess.run(["gh", *arguments], capture_output=True, text=True, input=stdin,
+                          env={**__import__("os").environ, "GH_HOST": HOST})
+    if done.returncode != 0:
+        raise SystemExit(f"pr-diagram: gh {' '.join(arguments)[:60]} failed: {done.stderr.strip()[:300]}")
+    return done.stdout.strip()
+
+
+def repository():
+    url = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    match = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
+    if not match:
+        raise SystemExit("pr-diagram: cannot read the repository from origin")
+    return match.group(1)
+
+
+def branch_slug():
+    name = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True).stdout.strip()
+    tail = name.split("/")[-1]
+    return re.sub(r"[^a-z0-9-]+", "-", tail.lower()).strip("-") or "assets"
+
+
+def api(path, method=None, payload=None):
+    arguments = ["api", path]
+    if method:
+        arguments += ["-X", method]
+    if payload is not None:
+        arguments += ["--input", "-"]
+    return gh(*arguments, stdin=json.dumps(payload) if payload is not None else None)
+
+
+def blob(repo, path):
+    content = base64.b64encode(Path(path).read_bytes()).decode()
+    answer = json.loads(api(f"/repos/{repo}/git/blobs", "POST", {"content": content, "encoding": "base64"}))
+    return answer["sha"]
+
+
+def head_of(repo, branch):
+    done = subprocess.run(["gh", "api", f"/repos/{repo}/git/ref/heads/{branch}"], capture_output=True, text=True,
+                          env={**__import__("os").environ, "GH_HOST": HOST})
+    if done.returncode != 0:
+        return None
+    return json.loads(done.stdout)["object"]["sha"]
+
+
+def publish(repo, branch, files, message):
+    parent = head_of(repo, branch)
+    tree = [{"path": name, "mode": "100644", "type": "blob", "sha": blob(repo, path)} for name, path in files]
+    body = {"tree": tree}
+    if parent:
+        body["base_tree"] = json.loads(api(f"/repos/{repo}/git/commits/{parent}"))["tree"]["sha"]
+    tree_sha = json.loads(api(f"/repos/{repo}/git/trees", "POST", body))["sha"]
+    commit = {"message": message, "tree": tree_sha, "parents": [parent] if parent else []}
+    commit_sha = json.loads(api(f"/repos/{repo}/git/commits", "POST", commit))["sha"]
+    if parent:
+        api(f"/repos/{repo}/git/refs/heads/{branch}", "PATCH", {"sha": commit_sha, "force": False})
+    else:
+        api(f"/repos/{repo}/git/refs", "POST", {"ref": f"refs/heads/{branch}", "sha": commit_sha})
+    return commit_sha, parent is None
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pr", type=int, required=True)
+    parser.add_argument("--name", required=True, help="file stem, for example phase-1 or phase-1-updated")
+    parser.add_argument("--slug")
+    parser.add_argument("--png", required=True)
+    parser.add_argument("--svg", required=True)
+    parser.add_argument("--source", help="the .excalidraw file, so the user can edit it and mark it")
+    parser.add_argument("--alt", help="alt text for the image")
+    arguments = parser.parse_args()
+
+    for flag in ("png", "svg"):
+        if not Path(getattr(arguments, flag)).is_file():
+            raise SystemExit(f"pr-diagram: --{flag} {getattr(arguments, flag)} does not exist")
+
+    repo = repository()
+    branch = f"{ASSET_PREFIX}/{arguments.pr}-{arguments.slug or branch_slug()}"
+    files = [(f"{arguments.name}.png", arguments.png), (f"{arguments.name}.svg", arguments.svg)]
+    if arguments.source and Path(arguments.source).is_file():
+        files.append((f"{arguments.name}.excalidraw", arguments.source))
+
+    sha, created = publish(repo, branch, files, f"{arguments.name} for pull request #{arguments.pr}")
+    print(f"pr-diagram: {'created' if created else 'updated'} {branch} at {sha[:10]}")
+    for name, _ in files:
+        print(f"  {name}")
+
+    base = f"https://{HOST}/{repo}/blob/{branch}"
+    alt = arguments.alt or arguments.name.replace("-", " ")
+    links = [f"[svg]({base}/{arguments.name}.svg?raw=1)"]
+    if arguments.source and Path(arguments.source).is_file():
+        links.append(f"[source]({base}/{arguments.name}.excalidraw?raw=1)")
+    print("\n--- paste this into the phase section ---")
+    print(f"![{alt}]({base}/{arguments.name}.png?raw=1)")
+    print()
+    print(" · ".join(links))
+
+
+if __name__ == "__main__":
+    main()

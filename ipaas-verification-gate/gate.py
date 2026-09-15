@@ -81,13 +81,14 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation")
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation", "pr-diagram")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 # No trailing slash: the skill entries are symlinks, and git matches a symlink as a file.
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
                          "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
-                         "**/.claude/bin/review-record", "**/.claude/bin/deviation", "**/.claude/deviations/",
+                         "**/.claude/bin/review-record", "**/.claude/bin/deviation", "**/.claude/bin/pr-diagram",
+                         "**/.claude/deviations/",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -270,7 +271,7 @@ GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".cla
                          ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
                           ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
-                          ".claude/bin/review-record", ".claude/bin/deviation",
+                          ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram",
                           "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a

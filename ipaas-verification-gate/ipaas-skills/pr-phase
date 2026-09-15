@@ -64,6 +64,57 @@ def headings(body):
     return [match.group(1).strip() for match in HEADING.finditer(body or "")]
 
 
+IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+DETAILS = re.compile(r"<details\b.*?</details>", re.DOTALL | re.IGNORECASE)
+LINK = re.compile(r"\[[^\]]*\]\([^)]+\)")
+
+
+def section_problems(section):
+    """A phase section is a diagram. Everything a sentence would say belongs in the drawing, and every
+    piece of machine evidence belongs inside a <details> fold. Prose in a pull request description is
+    the thing this rule exists to stop."""
+    problems = []
+    if not IMAGE.search(section):
+        problems.append("the section has no diagram. A phase section is one image, not a description.")
+    outside = DETAILS.sub("", section)
+    outside = IMAGE.sub("", outside)
+    outside = LINK.sub("", outside)
+    leftover = [line.strip() for line in outside.splitlines()
+                if line.strip(" \t\u00b7|-*_#\u2014")]
+    if leftover:
+        problems.append("prose outside the fold: " + repr(leftover[0][:70])
+                        + ". Put what it says into the diagram, and put machine evidence "
+                          "(gate.py pr-section, review-record --section) inside <details>.")
+    return problems
+
+
+def phase_heading(phase, revision):
+    if not revision:
+        return f"## Phase {phase}"
+    return f"## Phase {phase} (updated)" if revision == 1 else f"## Phase {phase} (updated {revision})"
+
+
+def next_revision(body, phase):
+    found = re.findall(rf"^##\s+Phase\s+{phase}\s+\(updated(?:\s+(\d+))?\)", body or "", re.MULTILINE)
+    if not found:
+        return 1
+    return max(int(each) if each else 1 for each in found) + 1
+
+
+def splice_revision(body, phase, revision, section):
+    """An update is a new section placed straight after the last section of the same phase, so the
+    description reads Phase 1, Phase 1 (updated), Phase 2, the way the phases actually happened."""
+    body = (body or "").rstrip("\n")
+    heading = phase_heading(phase, revision)
+    block = f"{heading}\n\n{section.strip()}"
+    same = re.compile(rf"^##\s+Phase\s+{phase}\b.*?(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+    spans = [match.end() for match in same.finditer(body)]
+    if not spans:
+        return f"{body}\n\n{block}\n", "appended"
+    at = spans[-1]
+    return (body[:at].rstrip("\n") + f"\n\n{block}\n\n" + body[at:].lstrip("\n")).rstrip("\n") + "\n", "inserted"
+
+
 def splice(body, phase, section):
     """The description with this phase's section put in place. Returns the body and what was done."""
     body = (body or "").rstrip("\n")
@@ -90,6 +141,10 @@ def main():
     parser.add_argument("--phase", type=int, required=True)
     parser.add_argument("--body-file", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--updated", action="store_true",
+                        help="add a new `(updated)` section for this phase instead of replacing its section")
+    parser.add_argument("--allow-prose", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("-h", "--help", action="store_true")
     arguments = parser.parse_args()
     if arguments.help:
@@ -103,10 +158,23 @@ def main():
     if re.match(r"^\s*##\s+Phase\s+\d", section):
         raise SystemExit("pr-phase: leave the `## Phase N` heading out of the file; this script writes it")
 
+    if not arguments.allow_prose:
+        problems = section_problems(section)
+        if problems:
+            print("pr-phase: the section was not written.")
+            for problem in problems:
+                print(f"  {problem}")
+            raise SystemExit(1)
+
     repo = repository()
     number = arguments.pr or pull_request_number()
     before = gh("api", f"/repos/{repo}/pulls/{number}", "--jq", ".body")
-    after, action = splice(before, arguments.phase, section)
+    if arguments.updated:
+        revision = next_revision(before, arguments.phase)
+        after, action = splice_revision(before, arguments.phase, revision, section)
+        action = f"{action} as (updated{'' if revision == 1 else ' ' + str(revision)})"
+    else:
+        after, action = splice(before, arguments.phase, section)
 
     kept = [each for each in headings(before) if each != f"Phase {arguments.phase}"]
     lost = [each for each in kept if each not in headings(after)]
