@@ -122,6 +122,13 @@ Green is a proposal, never applied code. Say that once in the header.
 
 ## Rules that hold everywhere
 
+- **Write the labels in plain, simple English.** The same house style as every other answer: short
+  words, short sentences, no jargon that is not defined right there. Do not reach for a fancier
+  word when a common one says it. Write "use", not "leverage". Write "so", not "thereby". Write
+  "stops working", not "degrades". Write "burns", not "accrues". Do not rotate synonyms for one
+  thing: if it is "delete" in one box it is "delete" in every box, never "remove" and never "drop".
+  A label that sounds impressive and says little is worse than a plain one, because the reader has
+  to decode it before they can decide. Never use an em dash.
 - Quote code verbatim. Name where it was quoted from, and say so in the header. If a line was
   shortened to fit, mark it (`...` or `->`) and say in the header that you did.
 - Every line number is read from a stated ref, never from memory. Name the ref.

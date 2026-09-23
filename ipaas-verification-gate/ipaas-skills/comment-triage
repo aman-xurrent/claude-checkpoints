@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# The user decides every review comment before any of it is fixed.
+#
+# The gate draws nothing and decides nothing. It holds the list of unresolved threads, reads the
+# user's `R:` marks off the triage diagram, and refuses code edits while a comment has no mark.
+#
+# Usage:
+#   .claude/bin/comment-triage fetch  [--pr N]
+#   .claude/bin/comment-triage decide  --pr N --marks <file.excalidraw|file.svg>
+#   .claude/bin/comment-triage status [--pr N]
+#
+#   fetch    store every unresolved thread with the reviewer's own words, and print the list.
+#            Each thread gets a token, C1, C2, C3, which names its column in the diagram.
+#   decide   read the marks and record one decision per thread.
+#            R:IN   -> fix it in this pull request.
+#            R:OUT  -> out of this pull request; raise it as a separate request.
+#            R:<text> -> do what the text says, and answer it in chat.
+#   status   print what is decided and what is still waiting.
+#
+# A mark is tied to a thread by the `C<n>` token on the line it sits next to, never by distance
+# alone. A mark that names no token records nothing and the command refuses, because a decision
+# written against the wrong comment is worse than no decision at all.
+#
+# Exit codes: 0 done, 2 bad usage or an unreadable mark, 3 the gate is not installed.
+set -euo pipefail
+
+GATE_PY="${IPAAS_GATE_PY:-$HOME/personal/scripts/gate/gate.py}"
+
+if [[ ! -f "$GATE_PY" ]]; then
+  echo "comment-triage: gate.py not found at $GATE_PY. Install the verification gate or set IPAAS_GATE_PY." >&2
+  exit 3
+fi
+
+action="${1:-}"; shift || true
+case "$action" in
+  fetch)  exec python3 "$GATE_PY" comment-fetch "$@" ;;
+  decide) exec python3 "$GATE_PY" comment-decide "$@" ;;
+  status) exec python3 "$GATE_PY" comment-status "$@" ;;
+  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+esac

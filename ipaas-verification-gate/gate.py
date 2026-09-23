@@ -81,7 +81,7 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation",
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation", "comment-triage",
                    "pr-diagram", "pr-create")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
@@ -89,8 +89,8 @@ LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
 LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-7]", "**/.claude/skills/phase-comments",
                          "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
                          "**/.claude/bin/review-record", "**/.claude/bin/deviation", "**/.claude/bin/pr-diagram",
-                         "**/.claude/bin/pr-create",
-                         "**/.claude/deviations/",
+                         "**/.claude/bin/pr-create", "**/.claude/bin/comment-triage",
+                         "**/.claude/deviations/", "**/.claude/comments/",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -190,9 +190,16 @@ CHECKS_LOCK_TIMEOUT_SECONDS = 1800
 
 PROOF_DIRECTORY = Path(".claude/proof")
 DEVIATIONS_PATH = Path(".claude/deviations")
+COMMENTS_PATH = Path(".claude/comments")
+COMMENT_FIX = "fix-in-this-pr"
+COMMENT_SEPARATE = "separate-request"
+COMMENT_REPLY = "follow-the-user's-words"
+TRIAGE_WRAPPER = ".claude/bin/comment-triage"
+MARKS_READER = Path.home() / "personal/scripts/excalidraw-marks"
+GITHUB_HOST = os.environ.get("GH_HOST", "git.4me.com")
 # What the gate itself writes into the working tree. It is never part of the change under proof:
 # counting it would move the diff digest and make a review or a proof stale the moment it is recorded.
-GATE_STATE_PREFIXES = (str(PROOF_DIRECTORY), str(DEVIATIONS_PATH))
+GATE_STATE_PREFIXES = (str(PROOF_DIRECTORY), str(DEVIATIONS_PATH), str(COMMENTS_PATH))
 DECLARATION_FILE_NAME = "declaration.json"
 RUNS_DIRECTORY_NAME = "runs"
 SURFACED_MARKER_NAME = ".surfaced"
@@ -269,11 +276,12 @@ GUARD_WRITE_TOKENS = (">", "sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "tru
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP", "send-pack",
                             "GIT_DIR=", "phased pause", "phased resume", "settings.local.json", "launchctl")
 GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".claude/proof/reviews",
-                         ".claude/deviations", "personal/scripts/gate", "personal/scripts/phased",
-                         ".local/state/gate", ".local/state/phased")
+                         ".claude/deviations", ".claude/comments", "personal/scripts/gate",
+                         "personal/scripts/phased", ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
                           ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
                           ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram", ".claude/bin/pr-create",
+                          ".claude/bin/comment-triage",
                           "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
@@ -301,7 +309,8 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare")
+                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare",
+                                  "comment-fetch", "comment-decide", "comment-status")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
 
@@ -1169,6 +1178,9 @@ def stop_message(root):
                                 for each in findings.get("proofs", []) + findings.get("sweep", [])
                                 if each["status"] != STATUS_PASS)
             messages.append(f"proof {findings.get('id')} finished {status}. {reasons or findings.get('reason', '')}")
+    comment_message = comment_stop_message(root)
+    if comment_message:
+        messages.append(comment_message)
     if code_paths:
         review_message = review_stop_message(root)
         if review_message:
@@ -1759,6 +1771,7 @@ def finalize(arguments):
         checks.append(("proof", "skip", f"phase {phase} needs no proof"))
     checks.append(references_check(root, paths))
     checks.append(review_check(root, paths))
+    checks.append(comment_check(root, paths))
     print_steps(checks)
     if checks[0][1] == "FAIL":
         sys.exit(2)
@@ -2351,7 +2364,36 @@ def guard_path(file_path):
             return f"`{expanded}` is part of the gate; the model never writes it."
     if expanded.endswith("settings.local.json") or expanded.endswith(".gate-skip-once"):
         return f"`{expanded}` holds the fence around the gate; the model never writes it."
-    return None
+    return undecided_comment_reason(expanded)
+
+
+def undecided_comment_reason(expanded):
+    """No code changes while the user still owes a decision on a review comment.
+
+    The gate cannot tell which comment an edit belongs to, so it holds every code edit until every
+    comment has a mark. The user lifts this by marking the diagram; the gate never decides for them.
+    """
+    root = repository_root(nearest_directory(expanded))
+    relative = relative_to(root, expanded) if root is not None else None
+    if relative is None or not (is_code_path(relative) or is_spec_path(relative)):
+        return None
+    return comment_guard_reason(root)
+
+
+def nearest_directory(expanded):
+    """`git -C` needs a directory. A Write names a file that may not exist yet, so walk up to the
+    first directory that does."""
+    candidate = Path(expanded).parent
+    while not candidate.is_dir() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
+def relative_to(root, expanded):
+    try:
+        return str(Path(expanded).resolve().relative_to(root.resolve()))
+    except (ValueError, OSError):
+        return None
 
 
 def fence_deny_rules():
@@ -3320,6 +3362,276 @@ def traced_main(argv):
                      exit_code, failure, started_at)
 
 
+# ------------------------------------------------------------ comment triage
+# The user decides every review comment before any of it is fixed. The gate draws nothing and
+# decides nothing: it holds the list, reads the user's marks off the diagram, and refuses code edits
+# while a comment is still unanswered.
+
+THREAD_QUERY = """
+query($owner:String!,$repo:String!,$pr:Int!){
+  repository(owner:$owner,name:$repo){ pullRequest(number:$pr){
+    reviewThreads(first:100){ nodes{
+      id isResolved isOutdated path line startLine diffSide
+      comments(first:20){ nodes{ author{login} body createdAt url } } } } } }
+}
+"""
+
+
+def comments_directory(root, pr):
+    return root / COMMENTS_PATH / str(pr)
+
+
+def comment_pointer(root):
+    return root / COMMENTS_PATH / "current.json"
+
+
+def repository_slug(root):
+    """owner/name from the origin remote, so the query does not hardcode one repository."""
+    url = git(root, "remote", "get-url", "origin", allow_exit_codes=(0, 1, 2, 128)).stdout.strip()
+    match = re.search(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?$", url)
+    return f"{match.group(1)}/{match.group(2)}" if match else None
+
+
+def pull_request_number(root, given):
+    if given:
+        return given
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD", allow_exit_codes=(0, 128)).stdout.strip()
+    done = subprocess.run(["gh", "pr", "view", branch, "--json", "number", "--jq", ".number"],
+                          cwd=str(root), capture_output=True, text=True, env=github_environment())
+    return done.stdout.strip() or None
+
+
+def github_environment():
+    environment = dict(os.environ)
+    environment.setdefault("GH_HOST", GITHUB_HOST)
+    return environment
+
+
+def comment_fetch(arguments):
+    """Store every unresolved review thread, with the reviewer's own words kept whole.
+
+    The diagram has to carry what the reviewer wrote, not a summary of it, so the body is stored
+    verbatim and never shortened here."""
+    root = require_repository("comment-triage fetch")
+    pr = pull_request_number(root, argument_value(arguments, "--pr"))
+    slug = repository_slug(root)
+    if not pr or not slug:
+        refuse("comment-triage fetch", ["could not tell which pull request this branch belongs to; pass --pr N"])
+    owner, name = slug.split("/", 1)
+    done = subprocess.run(["gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"repo={name}",
+                           "-F", f"pr={pr}", "-f", f"query={THREAD_QUERY}"],
+                          cwd=str(root), capture_output=True, text=True, env=github_environment())
+    if done.returncode != 0:
+        refuse("comment-triage fetch", [f"the thread query failed: {done.stderr.strip()[:300]}"])
+    payload = json.loads(done.stdout or "{}")
+    nodes = (((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads", {}).get("nodes", [])
+    threads = [thread_record(index, node) for index, node in enumerate(
+        [node for node in nodes if not node.get("isResolved")], start=1)]
+
+    directory = comments_directory(root, pr)
+    directory.mkdir(parents=True, exist_ok=True)
+    previous = {each["id"]: each for each in (read_json(directory / "threads.json", default={}) or {}).get("threads", [])}
+    for thread in threads:
+        was = previous.get(thread["id"])
+        thread["reopened"] = bool(was and was.get("latest_at") and thread["latest_at"] > was["latest_at"])
+    write_json(directory / "threads.json", {"pr": pr, "fetched_at": now_iso(), "threads": threads})
+    write_json(comment_pointer(root), {"pr": pr, "updated_at": now_iso()})
+    drop_stale_decisions(root, pr, threads)
+    print_thread_list(pr, threads, decisions_of(root, pr))
+
+
+def thread_record(index, node):
+    comments = (node.get("comments") or {}).get("nodes") or []
+    first = comments[0] if comments else {}
+    return {
+        "token": f"C{index}",
+        "id": node["id"],
+        "path": node.get("path"),
+        "line": node.get("line") or node.get("startLine"),
+        "outdated": bool(node.get("isOutdated")),
+        "author": (first.get("author") or {}).get("login", "?"),
+        "url": first.get("url"),
+        "latest_at": max([comment.get("createdAt", "") for comment in comments] or [""]),
+        "comments": [{"author": (comment.get("author") or {}).get("login", "?"),
+                      "body": comment.get("body", ""), "created_at": comment.get("createdAt", "")}
+                     for comment in comments],
+    }
+
+
+def drop_stale_decisions(root, pr, threads):
+    """A reviewer who replies on a thread reopens it. The old decision was made without those words,
+    so it stops counting and the user sees the thread again."""
+    directory = comments_directory(root, pr)
+    decisions = read_json(directory / "decisions.json", default={}) or {}
+    reopened = [thread["token"] for thread in threads if thread.get("reopened") and thread["id"] in decisions]
+    for thread in threads:
+        if thread.get("reopened"):
+            decisions.pop(thread["id"], None)
+    if reopened:
+        write_json(directory / "decisions.json", decisions)
+        print(f"comment-triage: {', '.join(reopened)} got a new reply, so the earlier decision no longer counts.")
+
+
+def decisions_of(root, pr):
+    return read_json(comments_directory(root, pr) / "decisions.json", default={}) or {}
+
+
+def print_thread_list(pr, threads, decisions):
+    if not threads:
+        print(f"comment-triage: pull request {pr} has no unresolved review thread.")
+        return
+    undecided = [thread for thread in threads if thread["id"] not in decisions]
+    print(f"comment-triage: pull request {pr} has {len(threads)} unresolved thread(s), "
+          f"{len(undecided)} still waiting for a decision.\n")
+    for thread in threads:
+        decision = decisions.get(thread["id"])
+        state = f"decided: {decision['verdict']}" if decision else "NO DECISION"
+        outdated = " (outdated)" if thread["outdated"] else ""
+        print(f"{thread['token']}  {thread['path']}:{thread['line']}{outdated}  by {thread['author']}  [{state}]")
+        for comment in thread["comments"]:
+            for line in comment["body"].strip().splitlines():
+                print(f"      {line}")
+        print()
+
+
+def comment_decide(arguments):
+    """Turn the user's `R:` marks on the triage diagram into one decision per thread.
+
+    A mark is tied to a thread by the `C<n>` token on the anchor it sits next to, never by distance
+    alone. Two anchors can sit the same distance from one mark, so a mark that names no token, or
+    names one that is not on the list, records nothing: a decision written against the wrong comment
+    is worse than no decision, because nothing later shows it went to the wrong place.
+    """
+    root = require_repository("comment-triage decide")
+    pr = pull_request_number(root, argument_value(arguments, "--pr"))
+    marks_file = argument_value(arguments, "--marks")
+    if not pr or not marks_file:
+        refuse("comment-triage decide", ["usage: comment-triage decide --pr N --marks <file.excalidraw|file.svg>"])
+    stored = read_json(comments_directory(root, pr) / "threads.json", default={}) or {}
+    threads = stored.get("threads") or []
+    if not threads:
+        refuse("comment-triage decide", [f"no thread list for pull request {pr}. Run `comment-triage fetch` first."])
+
+    marks, problem = read_marks(marks_file)
+    if problem:
+        refuse("comment-triage decide", [problem])
+    if not marks:
+        refuse("comment-triage decide", [f"{marks_file} carries no R: mark yet."])
+
+    by_token = {thread["token"]: thread for thread in threads}
+    decisions = decisions_of(root, pr)
+    recorded, problems = [], []
+    for mark in marks:
+        token = token_of(mark.get("point") or "")
+        if token is None:
+            problems.append(f'the mark "R:{mark["reply"]}" sits next to "{shorten(mark.get("point"))}", '
+                            f"which names no comment. Put the mark next to the `C<n> decision:` line of its column.")
+            continue
+        if token not in by_token:
+            problems.append(f'the mark "R:{mark["reply"]}" names {token}, which is not on this pull request\'s list '
+                            f"({', '.join(sorted(by_token))}).")
+            continue
+        thread = by_token[token]
+        decisions[thread["id"]] = {
+            "token": token, "verdict": verdict_of_mark(mark), "instruction": mark["reply"],
+            "path": thread["path"], "line": thread["line"], "decided_at": now_iso(),
+            "marks_file": str(Path(marks_file).expanduser()),
+        }
+        recorded.append((token, decisions[thread["id"]]["verdict"], mark["reply"]))
+
+    if problems:
+        refuse("comment-triage decide", problems)
+    write_json(comments_directory(root, pr) / "decisions.json", decisions)
+    print(f"comment-triage: recorded {len(recorded)} decision(s) for pull request {pr}.")
+    for token, verdict, reply in recorded:
+        print(f"  {token}  {verdict}" + (f"  \"{reply}\"" if verdict == COMMENT_REPLY else ""))
+    undecided = [thread["token"] for thread in threads if thread["id"] not in decisions]
+    print(f"  still waiting: {', '.join(undecided)}" if undecided else "  every thread has a decision.")
+
+
+def read_marks(marks_file):
+    path = Path(marks_file).expanduser()
+    if not path.is_file():
+        return None, f"{path} does not exist."
+    done = subprocess.run([str(MARKS_READER), str(path), "--json"], capture_output=True, text=True)
+    if done.returncode != 0:
+        return None, f"could not read the marks: {done.stderr.strip()[:200]}"
+    try:
+        return json.loads(done.stdout or "[]"), None
+    except json.JSONDecodeError:
+        return None, f"the marks reader did not answer with JSON: {done.stdout.strip()[:200]}"
+
+
+def token_of(anchor_text):
+    match = re.search(r"\bC(\d+)\b", anchor_text)
+    return f"C{match.group(1)}" if match else None
+
+
+def verdict_of_mark(mark):
+    if mark["verdict"] == "in":
+        return COMMENT_FIX
+    if mark["verdict"] == "out":
+        return COMMENT_SEPARATE
+    return COMMENT_REPLY
+
+
+def shorten(text):
+    first = (text or "").strip().splitlines()[0] if (text or "").strip() else "nothing"
+    return first[:60]
+
+
+def comment_state(root):
+    """What the guard and the Stop hook read. Local files only: an edit must never wait on the network."""
+    pointer = read_json(comment_pointer(root), default={}) or {}
+    pr = pointer.get("pr")
+    if not pr:
+        return None
+    stored = read_json(comments_directory(root, pr) / "threads.json", default={}) or {}
+    threads = stored.get("threads") or []
+    decisions = decisions_of(root, pr)
+    undecided = [thread for thread in threads if thread["id"] not in decisions]
+    return {"pr": pr, "threads": threads, "decisions": decisions, "undecided": undecided}
+
+
+def comment_status(arguments):
+    root = require_repository("comment-triage status")
+    state = comment_state(root)
+    if state is None:
+        print("comment-triage: no review comment has been fetched on this branch.")
+        return
+    print_thread_list(state["pr"], state["threads"], state["decisions"])
+
+
+def comment_guard_reason(root):
+    state = comment_state(root)
+    if not state or not state["undecided"]:
+        return None
+    waiting = ", ".join(f"{thread['token']} ({thread['path']}:{thread['line']})" for thread in state["undecided"][:6])
+    return (f"{len(state['undecided'])} review comment(s) on pull request {state['pr']} have no decision yet: {waiting}. "
+            f"Draw the triage diagram, then wait for the R: marks and run `{TRIAGE_WRAPPER} decide`. "
+            f"You do not decide these; the user does.")
+
+
+def comment_stop_message(root):
+    state = comment_state(root)
+    if not state or not state["undecided"]:
+        return None
+    return (f"{len(state['undecided'])} of {len(state['threads'])} review comment(s) on pull request {state['pr']} "
+            f"are still waiting for the user's decision: "
+            + ", ".join(thread["token"] for thread in state["undecided"])
+            + f". Nothing is fixed until they are marked.")
+
+
+def comment_check(root, paths):
+    state = comment_state(root)
+    if state is None:
+        return ("comments", "skip", "no review comment fetched")
+    if state["undecided"]:
+        return ("comments", "FAIL",
+                ", ".join(thread["token"] for thread in state["undecided"]) + " have no decision from the user yet.")
+    return ("comments", "ok", f"{len(state['threads'])} thread(s) decided")
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -3350,6 +3662,9 @@ def main(argv):
         "deviation": lambda: deviation(arguments),
         "design-links": lambda: design_links(arguments),
         "figma-compare": lambda: figma_compare(arguments),
+        "comment-fetch": lambda: comment_fetch(arguments),
+        "comment-decide": lambda: comment_decide(arguments),
+        "comment-status": lambda: comment_status(arguments),
     }
     if command not in dispatch:
         print(f"unknown subcommand {command}\n{__doc__}")

@@ -146,6 +146,32 @@ Judge scope by one rule. A pre-existing problem that the change touches belongs 
 pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
 request. "Pre-existing" alone is never a reason to leave it.
 
+## Review comments: the user decides each one, then you fix
+
+A review comment is not a task list you work through. It is a question for the user. On every pull
+request, in the phased loop or not:
+
+1. `.claude/bin/comment-triage fetch --pr <n>` stores every unresolved thread and gives each one a
+   token, `C1`, `C2`, `C3`.
+2. Draw **one** triage diagram, one column per thread, on one spine, following
+   `~/personal/scripts/gate/diagram-convention.md`. Each column carries the token in its heading,
+   the reviewer's **own words quoted whole**, the file and line, the **current code quoted verbatim**
+   from a named ref, and the change you propose as a before and after diff in the green panel.
+   When there is a real fork, give each approach its own panel and say what it costs and what it
+   gives up. Do not invent approaches to look thorough: one obvious fix is one panel. Say whether
+   you think it belongs in this pull request, and why, so the user can disagree. End the column
+   with a `C<n> decision:` line in the gutter.
+3. Stop. The user marks the diagram.
+4. `.claude/bin/comment-triage decide --pr <n> --marks <file>` reads the marks.
+   `R:IN` means fix it in this pull request. `R:OUT` means it stays out of this pull request: raise
+   it as a separate request. `R:<text>` is an instruction: do what it says and answer it in chat.
+
+**The gate holds every edit to code and specs while any comment has no mark.** The user lifts it by
+marking the diagram. There is no other way through, and the gate never decides for them. A mark that
+names no `C<n>` records nothing and the command refuses: a decision written against the wrong comment
+is worse than no decision, because nothing later shows it went to the wrong place. When a reviewer
+replies again on a thread, its earlier decision stops counting and the user sees it again.
+
 ## Design links live in the request notes
 
 The user puts a labelled Figma link in the request. The links are in the **notes**, not in the request
@@ -206,6 +232,16 @@ Only the user decides that a difference is deliberate, and `--decided-by user` n
 Without it the record is a note from you: it explains the difference and it lets no mismatch pass.
 `--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
 design difference. Never record one to make a comparison pass.
+
+## Diagrams say it in plain English
+
+Every label in a diagram follows the same house style as every other answer: short words, short
+sentences, no jargon left undefined. Do not reach for a fancier word when a common one works. Write
+"use", not "leverage". Write "so", not "thereby". Write "stops working", not "degrades". One word
+means one thing across the whole drawing: if it is "delete" in one box it is "delete" in every box.
+A label that sounds impressive and says little is worse than a plain one, because the reader has to
+decode it before they can decide. Never use an em dash. The full convention lives in
+`~/personal/scripts/gate/diagram-convention.md`.
 
 ## Diagram replies
 
