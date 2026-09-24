@@ -143,6 +143,44 @@ def mean_brightness(png_path):
         return None
 
 
+SOURCE_DIRECTORY = Path.home() / ".claude/excalidraw"
+MARKS_READER = Path.home() / "personal/scripts/excalidraw-marks"
+
+
+def mark_count(path):
+    if not Path(path).is_file() or not MARKS_READER.is_file():
+        return None
+    done = subprocess.run([str(MARKS_READER), str(path), "--json"], capture_output=True, text=True)
+    if done.returncode != 0:
+        return None
+    try:
+        return len(json.loads(done.stdout or "[]"))
+    except json.JSONDecodeError:
+        return None
+
+
+def refuse_stale_export(svg):
+    """The user's answers must reach the pull request.
+
+    The user marks the `.excalidraw` source. The image in the description comes from the svg, and an
+    svg exported before they marked it carries none of their answers. Publishing that quietly leaves
+    the description showing an unanswered diagram for ever, which is how every earlier decision was
+    lost: the marks lived only on a canvas that the next drawing cleared.
+    """
+    source = SOURCE_DIRECTORY / f"{Path(svg).stem}.excalidraw"
+    in_source = mark_count(source)
+    if not in_source:
+        return
+    if mark_count(svg):
+        return
+    raise SystemExit(
+        f"pr-diagram: {source.name} carries {in_source} answer(s) from the user and {Path(svg).name} carries none.\n"
+        f"  The svg was exported before the diagram was answered, so publishing it would show the pull\n"
+        f"  request an unanswered diagram. Import the marked source onto the canvas, export the svg\n"
+        f"  again, then publish. Read the answers with:\n"
+        f"    {MARKS_READER} {source}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr", type=int, required=True)
@@ -159,6 +197,7 @@ def main():
                          "go on the branch. Keep the source in ~/.claude/excalidraw/.")
     if not Path(arguments.svg).is_file():
         raise SystemExit(f"pr-diagram: --svg {arguments.svg} does not exist")
+    refuse_stale_export(arguments.svg)
 
     work = Path(tempfile.mkdtemp(prefix="pr-diagram-"))
     svg_path = work / f"{arguments.name}.svg"

@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Read the user's `R:` marks off an Excalidraw diagram.
+
+The user answers a diagram by adding a text element next to a point:
+
+    R:IN                      keep this point, it is in scope
+    R:OUT                     drop this point, it is out of scope
+    R:check this first        anything else is a reply about that point
+
+Usage:
+    excalidraw-marks <file.excalidraw | file.svg> [--json]
+
+It prints one line per mark with the point the mark sits next to. `--json` prints the
+same data for a script to read. An `.excalidraw` file carries exact positions, so prefer
+it. An SVG export works too: the positions come from the group transform.
+"""
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+# A mark is `R:` at the start of a line or after a space, and runs to the end of that line. The
+# user writes it where the diagram invites it, which is usually at the end of the point's own line
+# ("... decision: R:IN"), not on a line of its own. Matching only the start of a line read those
+# answers as no answer at all.
+MARK = re.compile(r"(?:^|(?<=\s))R\s*:\s*(.*)$", re.IGNORECASE)
+GROUP = re.compile(r'<g\s+transform="translate\(([-\d.]+)\s+([-\d.]+)\)(?:[^"]*)"\s*>(.*?)</g>', re.DOTALL)
+TEXT = re.compile(r"<text\b[^>]*>(.*?)</text>", re.DOTALL)
+TAG = re.compile(r"<[^>]+>")
+ENTITIES = (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"), ("&amp;", "&"))
+
+
+def unescape(text):
+    for entity, character in ENTITIES:
+        text = text.replace(entity, character)
+    return text
+
+
+def read_excalidraw(path):
+    """Every element with a centre and the text it carries. A label bound to a shape reports the
+    shape's centre, because that is where the user sees it."""
+    document = json.loads(Path(path).read_text())
+    elements = [element for element in document.get("elements", []) if not element.get("isDeleted")]
+    boxes = {element["id"]: element for element in elements}
+    points = []
+    for element in elements:
+        text = (element.get("text") or "").strip()
+        box = boxes.get(element.get("containerId")) or element
+        centre = (box.get("x", 0) + box.get("width", 0) / 2, box.get("y", 0) + box.get("height", 0) / 2)
+        points.append({"id": element["id"], "type": element["type"], "text": text, "centre": centre})
+    return points
+
+
+def read_svg(path):
+    """An export has no element ids, so a point is one group: its translate is the position and the
+    text nodes inside it are the label."""
+    source = Path(path).read_text()
+    points = []
+    for index, (x, y, body) in enumerate(GROUP.findall(source)):
+        pieces = [unescape(TAG.sub("", piece)).strip() for piece in TEXT.findall(body)]
+        text = "\n".join(piece for piece in pieces if piece)
+        points.append({"id": f"g{index}", "type": "text" if text else "shape", "text": text,
+                       "centre": (float(x), float(y))})
+    return points
+
+
+def split_marks(points):
+    """A mark is `R:` anywhere in a line, its own element or appended to a point's own label.
+
+    The label of a mark is what stands before it on the same line. One text element often holds
+    several points, each ending in `decision:`, so anchoring a mark to the whole element would hand
+    every answer the same label and lose which point it answered."""
+    marks, anchors = [], []
+    for point in points:
+        kept, found = [], []
+        for line in point["text"].splitlines():
+            match = MARK.search(line)
+            if not match:
+                kept.append(line)
+                continue
+            label = line[:match.start()].strip()
+            reply = match.group(1).strip()
+            if MARK.search(reply):
+                # The diagram's own instruction, "answer with R:IN or R:OUT beside its number".
+                # A real answer names one verdict; a sentence offering both is the legend, not a reply.
+                kept.append(line)
+                continue
+            found.append((reply, label))
+            if label:
+                kept.append(label)
+        rest = "\n".join(kept).strip()
+        if not found:
+            if point["text"]:
+                anchors.append(point)
+            continue
+        for reply, label in found:
+            marks.append({"reply": reply, "centre": point["centre"], "own_label": label or rest})
+        if rest:
+            anchors.append({**point, "text": rest})
+    return marks, anchors
+
+
+def nearest(mark, anchors):
+    if mark["own_label"]:
+        return mark["own_label"], 0.0
+    if not anchors:
+        return None, None
+    best = min(anchors, key=lambda point: math.dist(mark["centre"], point["centre"]))
+    return best["text"], round(math.dist(mark["centre"], best["centre"]), 1)
+
+
+def verdict_of(reply):
+    upper = reply.strip().upper()
+    if upper == "IN":
+        return "in"
+    if upper == "OUT":
+        return "out"
+    return "reply"
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__)
+        return 2
+    path = Path(argv[1]).expanduser()
+    if not path.is_file():
+        print(f"excalidraw-marks: {path} does not exist")
+        return 2
+    points = read_svg(path) if path.suffix.lower() == ".svg" else read_excalidraw(path)
+    marks, anchors = split_marks(points)
+    results = []
+    for mark in marks:
+        label, distance = nearest(mark, anchors)
+        results.append({"verdict": verdict_of(mark["reply"]), "reply": mark["reply"],
+                        "point": label, "distance": distance})
+    if "--json" in argv:
+        print(json.dumps(results, indent=2))
+        return 0
+    if not results:
+        print(f"excalidraw-marks: no R: mark in {path.name} ({len(points)} element(s) read)")
+        return 0
+    for result in results:
+        head = {"in": "IN ", "out": "OUT", "reply": "R  "}[result["verdict"]]
+        note = f": {result['reply']}" if result["verdict"] == "reply" else ""
+        print(f"{head}{note}\n    point: {result['point']}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

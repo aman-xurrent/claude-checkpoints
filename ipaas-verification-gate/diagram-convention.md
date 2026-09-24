@@ -120,6 +120,26 @@ right of the spine, stage markers to the left of it.
 
 Green is a proposal, never applied code. Say that once in the header.
 
+## Answers stay on the diagram
+
+The user answers a diagram by typing `R:IN`, `R:OUT` or `R:<text>` on it, usually at the end of the
+point's own line, after `decision:`. Those answers are the record of what was decided. They must
+survive every redraw and they must reach the pull request.
+
+- **Export before you clear.** The Excalidraw canvas is one canvas. Drawing the next diagram
+  destroys the one on it, and with it every answer the user typed. Export the canvas to its named
+  file in `~/.claude/excalidraw/` first, every time, with no exception.
+- **Republish after the user answers.** Read the answers, then import the marked source, export the
+  svg again, and run `pr-diagram` with the **same `--name`**. The file lands at the same path on the
+  same branch and the description's image updates in place, so no pull request edit is needed.
+  `pr-diagram` refuses an svg with no answers when its source has them.
+- **A redraw renders the answer as content, not as a floating mark.** When a point has been
+  answered, the new drawing states it inside the point: `O3  decision: IN, phase 7 ships without
+  shared-mailbox evidence`. Never try to put the old `R:` text back by position. The wording moves,
+  the coordinates do not, and a mark replaced next to the wrong point is worse than no mark.
+- An answered point keeps its answer visible for the rest of the pull request's life. That is how
+  the user sees what was settled and what is still open, without reading back through the thread.
+
 ## Rules that hold everywhere
 
 - **Write the labels in plain, simple English.** The same house style as every other answer: short

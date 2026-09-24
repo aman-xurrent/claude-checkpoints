@@ -252,8 +252,22 @@ reading the picture:
 ~/personal/scripts/excalidraw-marks <file.excalidraw|file.svg>
 ```
 
-`R:IN` keeps that point, `R:OUT` drops it, and `R:<text>` is a reply about it. Each mark reports the
-point it sits next to. Act on every mark before you redraw, and answer every `R:<text>` in chat.
+`R:IN` keeps that point, `R:OUT` drops it, and `R:<text>` is a reply about it. A mark sits anywhere
+on a line, usually at the end of the point's own line after `decision:`, and it reports the text
+before it on that line as the point it answers. Act on every mark before you redraw, and answer
+every `R:<text>` in chat.
+
+**The answers stay on the drawing.** The Excalidraw canvas is one canvas, so drawing the next
+diagram destroys the one on it and every answer typed on it. Export the canvas to its named file in
+`~/.claude/excalidraw/` before every clear. After the user answers, import the marked source, export
+the svg again, and republish with the same `.claude/bin/pr-diagram --name`: the file lands at the
+same path on the same branch, so the image in the description updates in place with no edit to the
+body. `pr-diagram` refuses an svg that carries no answer when its source has one.
+
+When you redraw a diagram whose points were answered, state each answer inside its point
+(`O3  decision: IN, phase 7 ships without shared-mailbox evidence`). Never put the old `R:` text
+back by position: the wording moves, the coordinates do not, and a mark replaced beside the wrong
+point is worse than no mark at all.
 
 ## The pull request description is diagrams, not prose
 
