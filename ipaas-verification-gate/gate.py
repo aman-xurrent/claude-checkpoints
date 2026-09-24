@@ -137,7 +137,9 @@ CI_SKIP_PHASES = PROOF_EXEMPT_PHASES
 CI_SKIP_KEYWORD = "[skip ci]"
 CI_SKIP_PATTERN = re.compile(r"\[(?:skip ci|ci skip|no ci|skip actions|actions skip)\]", re.IGNORECASE)
 TRAILER_LINE = re.compile(r"^[A-Za-z][A-Za-z0-9-]*:\s")
-CONNECTOR_CORE = ("connector/lib/ipaas/connector/", "connector/lib/ipaas/job/", "connector/lib/ipaas/test_case/")
+CONNECTOR_FIXTURES = "connector-sdk/spec/fixtures/"
+CONNECTOR_CORE = ("connector/lib/ipaas/connector/", "connector/lib/ipaas/job/", "connector/lib/ipaas/test_case/",
+                  CONNECTOR_FIXTURES)
 PLATFORM_LOGIC = ("platform/app/models/", "platform/app/controllers/", "platform/app/services/", "platform/app/jobs/",
                   "platform/app/presenters/")
 FRONTEND_LOGIC = ("platform/app/javascript/components/", "platform/app/javascript/hooks/", "platform/app/javascript/common/",
@@ -466,7 +468,14 @@ def is_example_path(path):
     return name.endswith("_spec.rb") or ".test." in name or "/__tests__/" in f"/{path}"
 
 
+def is_connector_fixture(path):
+    """A shipped connector is source, even though it lives under connector-sdk/spec/fixtures."""
+    return path.startswith(CONNECTOR_FIXTURES) and Path(path).suffix in (".rb", ".svg")
+
+
 def is_spec_path(path):
+    if is_connector_fixture(path):
+        return False
     return bool(re.search(r"(^|/)spec/", path)) or is_example_path(path)
 
 
@@ -2375,7 +2384,7 @@ def undecided_comment_reason(expanded):
     """
     root = repository_root(nearest_directory(expanded))
     relative = relative_to(root, expanded) if root is not None else None
-    if relative is None or not (is_code_path(relative) or is_spec_path(relative)):
+    if relative is None or not (is_code_path(relative) or is_spec_path(relative) or is_connector_fixture(relative)):
         return None
     return comment_guard_reason(root)
 
