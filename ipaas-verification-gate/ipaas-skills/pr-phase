@@ -107,7 +107,7 @@ def splice_revision(body, phase, revision, section):
     body = (body or "").rstrip("\n")
     heading = phase_heading(phase, revision)
     block = f"{heading}\n\n{section.strip()}"
-    same = re.compile(rf"^##\s+Phase\s+{phase}\b.*?(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+    same = re.compile(rf"^##\s+Phase\s+{phase}\b.*?(?=^##\s+Phase\s|\Z)", re.MULTILINE | re.DOTALL)
     spans = [match.end() for match in same.finditer(body)]
     if not spans:
         return f"{body}\n\n{block}\n", "appended"
@@ -116,10 +116,15 @@ def splice_revision(body, phase, revision, section):
 
 
 def splice(body, phase, section):
-    """The description with this phase's section put in place. Returns the body and what was done."""
+    """The description with this phase's section put in place. Returns the body and what was done.
+
+    The section ends at the next *phase* heading, not at the next heading of any kind. A phase
+    section carries a fold holding `## Verification`, written by the gate itself, so bounding on
+    `^##` ended the section inside its own fold: the replacement cut the fold in half, left a
+    dangling `</details>`, and stranded everything the gate had generated."""
     body = (body or "").rstrip("\n")
     block = f"## Phase {phase}\n\n{section.strip()}"
-    pattern = re.compile(rf"^##\s+Phase\s+{phase}\b.*?(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+    pattern = re.compile(rf"^##\s+Phase\s+{phase}\b.*?(?=^##\s+Phase\s|\Z)", re.MULTILINE | re.DOTALL)
     if pattern.search(body):
         return pattern.sub(lambda _: block + "\n\n", body).rstrip("\n") + "\n", "replaced"
     return f"{body}\n\n{block}\n", "appended"

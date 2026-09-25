@@ -192,6 +192,7 @@ CHECKS_LOCK_TIMEOUT_SECONDS = 1800
 
 PROOF_DIRECTORY = Path(".claude/proof")
 DEVIATIONS_PATH = Path(".claude/deviations")
+BASE_CACHE_NAME = "base.json"
 COMMENTS_PATH = Path(".claude/comments")
 COMMENT_FIX = "fix-in-this-pr"
 COMMENT_SEPARATE = "separate-request"
@@ -212,7 +213,11 @@ LOG_FILE_NAME = "prover.log"
 REFERENCES_DIRECTORY_NAME = "references"
 REVIEWS_DIRECTORY_NAME = "reviews"
 DEVIATIONS_DIRECTORY_NAME = "deviations"
-DEVIATION_KINDS = ("design", "spec")
+# design and spec can excuse a measured difference when the user decided it. process cannot: it
+# records a place where the method did not fit the work, so the next run of the method can be
+# changed. It excuses nothing and lets nothing pass.
+DEVIATION_KINDS = ("design", "spec", "process")
+RECORD_ONLY_KINDS = ("process",)
 # Only the user can decide that the build may differ from the design on purpose. A deviation Claude
 # recorded is a note, and it never suppresses a mismatch.
 DEVIATION_DECIDERS = ("user", "claude")
@@ -278,6 +283,7 @@ GUARD_WRITE_TOKENS = (">", "sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "tru
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP", "send-pack",
                             "GIT_DIR=", "phased pause", "phased resume", "settings.local.json", "launchctl")
 GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".claude/proof/reviews",
+                         ".claude/proof/base.json",
                          ".claude/deviations", ".claude/comments", "personal/scripts/gate",
                          "personal/scripts/phased", ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
@@ -571,6 +577,7 @@ def launch():
         emit_context(f"gate: {declaration_path} has no \"proofs\" list; nothing launched.")
         return
 
+    refresh_base_cache(root)
     base_sha = diff_base(root)
     patch = snapshot_patch(root, base_sha)
     spec_patch, code_patch, paths = split_patch(patch)
@@ -1774,6 +1781,8 @@ def finalize(arguments):
     checks.append(("shape", "FAIL" if violations else "ok",
                    "\n".join(violations) if violations else f"phase {phase} shape holds over {len(own_paths)} file(s) changed since {own_base[:10]}"))
     checks += tool_checks_in_checks_worktree(root, paths, run_specs=phase in (6, 7))
+    refresh_base_cache(root)
+    checks.append(base_check(root, phase))
     if phase in (6, 7):
         checks.append(proof_check(root, paths))
     else:
@@ -2029,6 +2038,8 @@ def excused_by(box, deviations):
     """Only a user decision excuses a difference. A note Claude wrote excuses nothing."""
     for record in deviations:
         region = record.get("region")
+        if record.get("kind") in RECORD_ONLY_KINDS:
+            continue
         if record.get("decided_by") == "user" and region and inside_region(box, region):
             return record["id"]
     return None
@@ -2824,8 +2835,110 @@ def write_gate_test_environment():
 # ------------------------------------------------------------ references
 
 def diff_base(root):
-    completed = git(root, "merge-base", "HEAD", UPSTREAM_BRANCH, allow_exit_codes=(0, 1, 128))
-    return completed.stdout.strip() if completed.returncode == 0 and completed.stdout.strip() else "HEAD"
+    """The commit the change is measured from: the merge-base with the pull request's own base
+    branch, falling back to the upstream branch when there is no recorded base."""
+    reference = base_reference(root)
+    for candidate in (reference, UPSTREAM_BRANCH):
+        completed = git(root, "merge-base", "HEAD", candidate, allow_exit_codes=(0, 1, 128))
+        if completed.returncode == 0 and completed.stdout.strip():
+            return completed.stdout.strip()
+    return "HEAD"
+
+
+# ------------------------------------------------------------- the proof base
+# A pull request stacked on another one does not branch from main. Measuring its proof from the
+# merge-base with main reverts the parent along with the change, so the declared example fails
+# because the parent vanished rather than because the change matters, and the run passes having
+# proved nothing. The proof measures from the pull request's own base branch instead.
+#
+# The base is never taken from a file the model can write. It is read from the pull request and
+# cached by the gate, because a base the model chooses is a skip switch: set it to HEAD and every
+# revert reverts nothing.
+
+def base_cache_path(root):
+    return root / PROOF_DIRECTORY / BASE_CACHE_NAME
+
+
+def current_branch(root):
+    return git(root, "rev-parse", "--abbrev-ref", "HEAD", allow_exit_codes=(0, 128)).stdout.strip()
+
+
+def read_base_cache(root):
+    """The cached base, only when it belongs to the branch that is checked out."""
+    cache = read_json(base_cache_path(root))
+    if not cache or cache.get("branch") != current_branch(root):
+        return None
+    return cache
+
+
+def refresh_base_cache(root):
+    """Ask the pull request what it is based on. One network call, and never from a hook: the
+    callers are the proof launch and finalize, not Stop or the guard."""
+    branch = current_branch(root)
+    if not branch or branch == "HEAD":
+        return None
+    done = subprocess.run(["gh", "pr", "view", branch, "--json", "number,baseRefName,state"],
+                          cwd=str(root), capture_output=True, text=True, env=github_environment())
+    if done.returncode != 0:
+        return read_base_cache(root)
+    try:
+        answer = json.loads(done.stdout or "{}")
+    except json.JSONDecodeError:
+        return read_base_cache(root)
+    base_ref = answer.get("baseRefName")
+    if not base_ref:
+        return read_base_cache(root)
+    cache = {"branch": branch, "base_ref": base_ref, "pr": answer.get("number"),
+             "pr_state": answer.get("state"), "fetched_at": now_iso()}
+    write_json(base_cache_path(root), cache)
+    return cache
+
+
+def reference_exists(root, reference):
+    return git(root, "rev-parse", "--verify", "--quiet", reference, allow_exit_codes=(0, 1, 128)).returncode == 0
+
+
+def base_reference(root):
+    """Which ref the proof measures from. Local files only, because this runs in the Stop hook."""
+    cache = read_base_cache(root)
+    if not cache:
+        return UPSTREAM_BRANCH
+    candidate = f"origin/{cache['base_ref']}"
+    return candidate if reference_exists(root, candidate) else UPSTREAM_BRANCH
+
+
+def base_is_merged(root):
+    """Whether the base branch has landed on main. Returns None when there is nothing to judge."""
+    cache = read_base_cache(root)
+    if not cache:
+        return None
+    candidate = f"origin/{cache['base_ref']}"
+    if cache["base_ref"] == UPSTREAM_BRANCH.split("/", 1)[-1] or not reference_exists(root, candidate):
+        return None
+    return git(root, "merge-base", "--is-ancestor", candidate, UPSTREAM_BRANCH,
+               allow_exit_codes=(0, 1, 128)).returncode == 0
+
+
+def base_check(root, phase):
+    """Phases 6 and 7 are the ones that carry a proof. A proof against an unmerged parent measures
+    the parent's whole diff as well as this change, so it cannot say what this change proves."""
+    cache = read_base_cache(root)
+    if cache is None:
+        return ("base", "skip", "no pull request base recorded for this branch")
+    candidate = f"origin/{cache['base_ref']}"
+    if phase not in (6, 7):
+        return ("base", "ok", f"measuring from {base_reference(root)}")
+    merged = base_is_merged(root)
+    if merged is False:
+        return ("base", "FAIL",
+                f"this pull request is based on {cache['base_ref']}, which has not landed on "
+                f"{UPSTREAM_BRANCH} yet. A proof here would revert that branch too and pass without "
+                f"proving this change. Merge {cache['base_ref']} first, then rebase.")
+    if merged is None and not reference_exists(root, candidate):
+        return ("base", "FAIL",
+                f"the base branch {cache['base_ref']} is not fetched, so the proof cannot measure "
+                f"from it. Run `git fetch origin {cache['base_ref']}`.")
+    return ("base", "ok", f"measuring from {base_reference(root)}")
 
 
 def changed_code_files(root, base):

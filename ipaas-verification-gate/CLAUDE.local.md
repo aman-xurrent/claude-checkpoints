@@ -146,6 +146,41 @@ Judge scope by one rule. A pre-existing problem that the change touches belongs 
 pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
 request. "Pre-existing" alone is never a reason to leave it.
 
+## Connector specs: one run_action per example
+
+`run_action` memoises the action for the whole example. `spec/support/shared_contexts/action_context.rb:27`
+opens with `return @action if defined?(@action)`, so the second call in one example re-runs the
+**first** input and ignores the one you passed.
+
+```ruby
+it 'rejects an oversized body' do
+  run_action(valid_input)        # runs valid_input
+  expect { run_action(huge_body) }.to raise_error(...)   # runs valid_input AGAIN
+end
+```
+
+The example passes while proving nothing, which is the failure the gate exists to catch and cannot
+see: the revert proof only asks whether the example goes red without the change, and a memoised
+re-run goes red for the first input just as happily.
+
+**One `run_action` per example. Always.** A second input is a second example.
+
+## An action is declared with a failing run block from the start
+
+A connector action declared with no `run` block was reported to stop the application booting, found
+in PR 1059 after three phases, because phases 2 to 5 never run the test suite. Not verified here;
+the cost of the rule is one line either way.
+
+Declare the action and its placeholder together, in the phase that declares it:
+
+```ruby
+run do
+  raise NotImplementedError, 'TODO(phase-4 #<request>) send the message'
+end
+```
+
+The placeholder is the phase 3 contract. Phase 6 or 7 replaces it under proof.
+
 ## Review comments: the user decides each one, then you fix
 
 A review comment is not a task list you work through. It is a question for the user. On every pull

@@ -2,13 +2,18 @@
 # Record one deliberate difference between the design (or the spec) and the build.
 #
 # Usage:
-#   .claude/bin/deviation --id <slug> --kind design|spec \
+#   .claude/bin/deviation --id <slug> --kind design|spec|process \
 #       --summary "what differs" --reason "why" \
 #       [--source "figma 721-23920"] [--region x,y,width,height] \
 #       [--decided-by user --evidence "where the user decided it"]
 #
 # Only a user decision lets a design mismatch pass, and it needs --evidence. A record without
 # --decided-by user is a note from Claude: it explains the difference and lets nothing pass.
+#
+# --kind process records a place where the method did not fit the work, so the method can be
+# changed later. Example: a connector fixture cannot carry phase 3 stubs, because the gate reads
+# the DSL openers as logic and the sandbox refuses the stub body. A process record excuses nothing
+# and lets nothing pass. It is written down so the same wall is not hit a third time.
 # --region is the page area in pixels that the build does not follow, which the design
 # comparison crops out and diffs on its own.
 #
