@@ -2907,38 +2907,49 @@ def base_reference(root):
     return candidate if reference_exists(root, candidate) else UPSTREAM_BRANCH
 
 
-def base_is_merged(root):
-    """Whether the base branch has landed on main. Returns None when there is nothing to judge."""
+def base_behind(root):
+    """How many commits the base branch carries that this branch does not.
+
+    Whether the base has landed on main is not the question. The proof resets to the merge-base
+    with the base branch, so everything the parent already shipped is present in the red run and
+    only this change is reverted. A parent that is still open changes nothing about that.
+
+    What does matter is a base that has moved. The proof then measures against a parent that no
+    longer exists, and the branch has to be redone on the newer one anyway."""
     cache = read_base_cache(root)
     if not cache:
         return None
     candidate = f"origin/{cache['base_ref']}"
-    if cache["base_ref"] == UPSTREAM_BRANCH.split("/", 1)[-1] or not reference_exists(root, candidate):
+    if not reference_exists(root, candidate):
         return None
-    return git(root, "merge-base", "--is-ancestor", candidate, UPSTREAM_BRANCH,
-               allow_exit_codes=(0, 1, 128)).returncode == 0
+    done = git(root, "rev-list", "--count", f"HEAD..{candidate}", allow_exit_codes=(0, 128))
+    answer = done.stdout.strip()
+    return int(answer) if done.returncode == 0 and answer.isdigit() else None
 
 
 def base_check(root, phase):
-    """Phases 6 and 7 are the ones that carry a proof. A proof against an unmerged parent measures
-    the parent's whole diff as well as this change, so it cannot say what this change proves."""
+    """Phases 6 and 7 carry a proof, so the base they measure from has to be the real one.
+
+    A base that has not merged is fine: the proof resets to the merge-base with it, so the parent's
+    work is present in the red run and only this change is reverted. Stacking is the point. A base
+    that is not fetched, or one that has moved on, is not fine."""
     cache = read_base_cache(root)
     if cache is None:
         return ("base", "skip", "no pull request base recorded for this branch")
     candidate = f"origin/{cache['base_ref']}"
     if phase not in (6, 7):
         return ("base", "ok", f"measuring from {base_reference(root)}")
-    merged = base_is_merged(root)
-    if merged is False:
-        return ("base", "FAIL",
-                f"this pull request is based on {cache['base_ref']}, which has not landed on "
-                f"{UPSTREAM_BRANCH} yet. A proof here would revert that branch too and pass without "
-                f"proving this change. Merge {cache['base_ref']} first, then rebase.")
-    if merged is None and not reference_exists(root, candidate):
+    if not reference_exists(root, candidate):
         return ("base", "FAIL",
                 f"the base branch {cache['base_ref']} is not fetched, so the proof cannot measure "
                 f"from it. Run `git fetch origin {cache['base_ref']}`.")
-    return ("base", "ok", f"measuring from {base_reference(root)}")
+    behind = base_behind(root)
+    if behind:
+        return ("base", "FAIL",
+                f"this branch is {behind} commit(s) behind {cache['base_ref']}, so the proof would "
+                f"measure against a base that has moved. Rebase onto origin/{cache['base_ref']} "
+                f"first, then re-prove.")
+    return ("base", "ok", f"measuring from {base_reference(root)}, level with its base")
 
 
 def changed_code_files(root, base):

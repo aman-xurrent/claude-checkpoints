@@ -146,6 +146,30 @@ Judge scope by one rule. A pre-existing problem that the change touches belongs 
 pre-existing problem unrelated to the change does not: mark it `out-of-scope` and raise it as a separate
 request. "Pre-existing" alone is never a reason to leave it.
 
+## A stacked pull request measures from its own base
+
+A pull request opened on top of another one does not branch from main, and it does not wait for
+the parent to merge.
+
+The proof resets to the merge-base with **the pull request's own base branch**, so everything the
+parent already shipped is present in the red run and only this change is reverted. The declared
+example then fails because this change is gone, which is the question the proof asks. Whether the
+parent has landed on main changes nothing about that.
+
+The base comes from the pull request itself and the gate caches it. You never write it: a base you
+choose is a skip switch, because a base of HEAD makes every revert revert nothing.
+`.claude/proof/base.json` is refused to your tools, by the file path and by a shell redirect.
+
+`agent_task_finalize` checks the base on phases 6 and 7, the phases that carry a proof:
+
+- the base branch must be fetched, or the proof cannot measure from it;
+- the branch must not be **behind** its base. A base that has moved means the proof measures
+  against a parent that no longer exists, and the branch has to be redone on the newer one anyway.
+  Rebase onto `origin/<base>` and re-prove.
+
+Being behind is the real hazard, not being unmerged. Merge order to main is a merge-time rule and
+the gate does not enforce it here.
+
 ## Connector specs: one run_action per example
 
 `run_action` memoises the action for the whole example. `spec/support/shared_contexts/action_context.rb:27`
