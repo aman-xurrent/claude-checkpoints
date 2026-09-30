@@ -292,6 +292,31 @@ Without it the record is a note from you: it explains the difference and it lets
 `--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
 design difference. Never record one to make a comparison pass.
 
+## Say the thing, not its label
+
+People do not talk in identifiers. Never write `C3`, `O1`, `item 2`, `finding 3`, `phase 2` or
+`option B` in place of the thing itself.
+
+| Written | Write instead |
+| --- | --- |
+| "item 2 is fixed" | "the pull request description no longer loses its fold" |
+| "C3 decided" | "you marked the block-scope sweep as fix in this pull request" |
+| "O1 is still open" | "whether a real folder id is ever read is still open" |
+| "finding 3 is not caught" | "the spec whose own narrowing regex never fires is not caught" |
+
+The label is an address, not a name. It may sit **beside** the thing, and never **in for** it:
+"**C3**, the spec that lets one block vouch for another, is still green with the guard removed."
+
+Every first mention carries the words. A closing summary counts as a first mention, because it is
+often the only part that gets read. A table column of bare labels is the same defect in another
+shape: put a words column next to it.
+
+This is the diagram rule applied everywhere else. A diagram must not send the reader to an editor,
+and a sentence must not send the reader back up the page. The reader should never hold a lookup
+table in their head to read what you wrote.
+
+**Worked pairs: `~/personal/scripts/gate/examples/naming-things.md`.**
+
 ## Diagrams say it in plain English
 
 Every label in a diagram follows the same house style as every other answer: short words, short
