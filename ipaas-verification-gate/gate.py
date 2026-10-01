@@ -317,7 +317,7 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare", "prose",
+                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare",
                                   "comment-fetch", "comment-decide", "comment-status")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
@@ -1275,11 +1275,6 @@ def commit_msg(arguments):
     root = repository_root(os.getcwd())
     if root is None:
         return
-    body = "\n".join(line for line in message_path.read_text().splitlines() if not line.startswith("#"))
-    refusal = prose_refusal(body, "commit-msg: this message")
-    if refusal:
-        print(refusal)
-        sys.exit(1)
     trailers = []
     phase = phase_number(root)
     if phase is not None:
@@ -3769,97 +3764,6 @@ def comment_check(root, paths):
                 ", ".join(thread["token"] for thread in state["undecided"]) + " have no decision from the user yet.")
     return ("comments", "ok", f"{len(state['threads'])} thread(s) decided")
 
-
-# ------------------------------------------------------------------- prose
-# One failure, over and over: the plain verb is written, then swapped for a grander one so the
-# sentence sounds authoritative. The grander verb is always vaguer. "The clause blocks the request"
-# points at `return head(:bad_request)`. "The clause discharges the grant" points at nothing.
-#
-# The list below is the known offenders. The test that catches the next one is in CLAUDE.local.md:
-# if the sentence describes code, the verb must be one you can point at a line for.
-
-PUFFED_WORDS = {
-    "discharge": "does it, or name what it does: blocks, returns, skips",
-    "discharges": "does it, or name what it does: blocks, returns, skips",
-    "facilitate": "lets, or helps",
-    "facilitates": "lets, or helps",
-    "leverage": "use",
-    "leverages": "uses",
-    "utilize": "use",
-    "utilizes": "uses",
-    "utilise": "use",
-    "utilises": "uses",
-    "orchestrate": "runs, or drives",
-    "orchestrates": "runs, or drives",
-    "obviate": "removes the need for",
-    "obviates": "removes the need for",
-    "elucidate": "explains",
-    "elucidates": "explains",
-    "ascertain": "find out, or check",
-    "ascertains": "finds out, or checks",
-    "commence": "starts",
-    "commences": "starts",
-    "necessitate": "needs, or forces",
-    "necessitates": "needs, or forces",
-    "delineate": "sets out, or lists",
-    "delineates": "sets out, or lists",
-    "encompass": "covers, or holds",
-    "encompasses": "covers, or holds",
-    "endeavour": "try",
-    "endeavor": "try",
-    "aforementioned": "name the thing again",
-    "pursuant": "under, or following",
-    "henceforth": "from now on",
-    "thereby": "so",
-    "herein": "here",
-    "wherein": "where",
-    "whilst": "while",
-    "albeit": "though",
-    "accrue": "builds up",
-    "accrues": "builds up",
-    "seamless": "say what does not break",
-    "seamlessly": "say what does not break",
-}
-PROSE_SKIP = re.compile(r"```.*?```|`[^`]*`|^\s{4,}\S|https?://\S+", re.DOTALL | re.MULTILINE)
-
-
-def prose_problems(text):
-    """Every puffed-up word with the plain one that says more.
-
-    Code, inline code spans, indented blocks and URLs are skipped: a method really can be named
-    `discharge`, and quoting it is not the same as writing it."""
-    stripped = PROSE_SKIP.sub(" ", text or "")
-    found = {}
-    for match in re.finditer(r"\b([A-Za-z]+)\b", stripped):
-        word = match.group(1).lower()
-        if word in PUFFED_WORDS and word not in found:
-            found[word] = PUFFED_WORDS[word]
-    return [f'"{word}" -> {plain}' for word, plain in found.items()]
-
-
-def prose_command(arguments):
-    """Check a file, or standard input, before it is written anywhere."""
-    text = Path(arguments[0]).read_text() if arguments else sys.stdin.read()
-    problems = prose_problems(text)
-    if not problems:
-        print("prose: nothing reaching for a grander word.")
-        return
-    print("prose: a plain word says more here.")
-    for problem in problems:
-        print(f"  {problem}")
-    sys.exit(1)
-
-
-def prose_refusal(text, what):
-    problems = prose_problems(text)
-    if not problems:
-        return None
-    return (f"{what} reaches for a grander word where a plain one says more:\n  "
-            + "\n  ".join(problems)
-            + "\n  Write the verb you can point at a line for. If you cannot point at a line, "
-              "the word is hiding that you do not know what happens.")
-
-
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -3890,7 +3794,6 @@ def main(argv):
         "deviation": lambda: deviation(arguments),
         "design-links": lambda: design_links(arguments),
         "figma-compare": lambda: figma_compare(arguments),
-        "prose": lambda: prose_command(arguments),
         "comment-fetch": lambda: comment_fetch(arguments),
         "comment-decide": lambda: comment_decide(arguments),
         "comment-status": lambda: comment_status(arguments),

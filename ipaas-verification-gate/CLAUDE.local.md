@@ -313,14 +313,9 @@ what it does.
 
 Never revise a plain word upward on a second pass. The first plain word was right.
 
-The known offenders are refused by the `commit-msg` hook, so a commit carrying one does not land.
-Check any other text before you send it:
-
-```
-python3 ~/personal/scripts/gate/gate.py prose <file>
-```
-
-The list is not the rule. The test is.
+There is no list of banned words, and there will not be one. A list catches only the words already
+on it; the next one walks straight past, which is exactly how "discharges" got through a rule that
+had banned "leverage" since the first day. The test is the rule.
 
 ## Say the thing, not its label
 
