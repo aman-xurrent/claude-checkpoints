@@ -292,6 +292,36 @@ Without it the record is a note from you: it explains the difference and it lets
 `--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
 design difference. Never record one to make a comparison pass.
 
+## Never trade a plain verb for a grander one
+
+A register habit, not a word choice. The plain thing gets written, then re-rendered to sound
+authoritative, and the grander verb is always vaguer.
+
+| Written | What it hides |
+| --- | --- |
+| "the one clause that **discharges** it" | which clause, and what it does |
+| "**leverages** the existing helper" | it calls it |
+| "**encompasses** both spellings" | it matches both |
+| "**necessitates** a rebase" | you have to rebase |
+
+**The test: if the sentence describes code, use the verb you can point at a line for.** Blocks,
+returns, raises, skips, writes, deletes, reverts, matches, refuses. "The clause blocks the request"
+points at `return head(:bad_request)`. "The clause discharges the grant" points at nothing.
+
+When no line can be pointed at, the grand word is covering a gap. Go and read the code, then write
+what it does.
+
+Never revise a plain word upward on a second pass. The first plain word was right.
+
+The known offenders are refused by the `commit-msg` hook, so a commit carrying one does not land.
+Check any other text before you send it:
+
+```
+python3 ~/personal/scripts/gate/gate.py prose <file>
+```
+
+The list is not the rule. The test is.
+
 ## Say the thing, not its label
 
 People do not talk in identifiers. Never write `C3`, `O1`, `item 2`, `finding 3`, `phase 2` or
