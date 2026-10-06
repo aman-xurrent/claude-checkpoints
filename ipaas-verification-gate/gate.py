@@ -3892,21 +3892,38 @@ def live_browser(root, arguments):
         refuse("live-record", problems)
 
     url = f"http://127.0.0.1:{port}{path}"
-    done = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{size_download}",
-                           "--max-time", "20", url], capture_output=True, text=True)
+    # Redirects are followed, because this application redirects by design: every page carries
+    # redirect_to_pick_solution, so refusing a 302 refused a page that renders perfectly well. What
+    # matters is where the chain ends, not that it moved.
+    done = subprocess.run(["curl", "-sL", "-o", "/dev/null",
+                           "-w", "%{http_code} %{size_download} %{num_redirects} %{url_effective}",
+                           "--max-time", "30", url], capture_output=True, text=True)
     answer = (done.stdout or "").split()
     status = answer[0] if answer else "000"
     size = int(answer[1]) if len(answer) > 1 and answer[1].isdigit() else 0
+    redirects = int(answer[2]) if len(answer) > 2 and answer[2].isdigit() else 0
+    landed = answer[3] if len(answer) > 3 else url
+
     if status == "000":
         refuse("live-record", [
             f"nothing answered on {url}. The page was never rendered, so there is nothing to record.",
             "Start the server in the checks worktree, drive the page, then record it.",
             "There is no way past this. A change nobody has seen does not leave the draft."])
+    if not landed.startswith(f"http://127.0.0.1:{port}"):
+        refuse("live-record", [
+            f"{url} left the application and ended at {landed}.",
+            "That is the sign-in bounce: nobody is logged in, so no page can render.",
+            "The checks database has no user. STUB_IDENTITY_PROVIDER=true makes the current user",
+            "User.first, so seed one in the checks worktree and the page renders with no login.",
+            "The gate does not carry a credential and will not accept a page it could not reach."])
     if not status.startswith("2"):
-        refuse("live-record", [f"{url} answered HTTP {status}. The page did not render."])
+        refuse("live-record", [f"{url} ended at {landed} with HTTP {status}. The page did not render."])
 
-    summary = [f"{url} answered HTTP {status}, {size} bytes", f"asserted: {asserted}"]
+    summary = [f"{url} -> {landed} HTTP {status}, {size} bytes"
+               + (f", {redirects} redirect(s)" if redirects else ""),
+               f"asserted: {asserted}"]
     record = {"kind": "browser", "url": url, "path": path, "http_status": status,
+              "landed": landed, "redirects": redirects,
               "bytes": size, "asserted": asserted, "summary": summary}
     if screenshot:
         shot = Path(screenshot).expanduser()

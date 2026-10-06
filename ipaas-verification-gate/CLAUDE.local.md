@@ -130,6 +130,13 @@ real stdout. A screenshot alone proves nothing, because a session can write a pn
 Which browser does not matter: Chrome through its MCP, Playwright, anything that drives a real page.
 What matters is that the server answered when the record was taken.
 
+Redirects are followed, because this application redirects by design: every page carries
+`redirect_to_pick_solution`, so a 302 is normal and the chain is what counts. The record keeps where
+it landed. A chain that leaves `127.0.0.1` is the sign-in bounce, which means nobody is logged in and
+no page can render: the checks database has no user. `STUB_IDENTITY_PROVIDER=true` makes the current
+user `User.first`, so seed one there. The gate carries no credential and will not accept a page it
+could not reach itself.
+
 **The record is keyed to the diff.** Change the code afterwards and it goes stale, because a change
 nobody has rendered since is a change nobody has seen. Record it again. That covers the edit made
 after phase 7 as much as the first one.
