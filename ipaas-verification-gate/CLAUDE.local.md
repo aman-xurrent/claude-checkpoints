@@ -132,9 +132,10 @@ What matters is that the server answered when the record was taken.
 
 Redirects are followed, because this application redirects by design: every page carries
 `redirect_to_pick_solution`, so a 302 is normal and the chain is what counts. The record keeps where
-it landed. A chain that leaves `127.0.0.1` is the sign-in bounce, which means nobody is logged in and
-no page can render: the checks database has no user. `STUB_IDENTITY_PROVIDER=true` makes the current
-user `User.first`, so seed one there. The gate carries no credential and will not accept a page it
+it landed. A chain that leaves `127.0.0.1` means no page of the change rendered, and the landing url says why:
+either the sign-in flow, when the current user cannot be established (check that the server has
+`STUB_IDENTITY_PROVIDER=true` and that `User.first` exists in the checks database), or an external
+host the page itself redirects to. The gate carries no credential and will not accept a page it
 could not reach itself.
 
 **The record is keyed to the diff.** Change the code afterwards and it goes stale, because a change

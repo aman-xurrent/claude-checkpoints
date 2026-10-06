@@ -3911,11 +3911,12 @@ def live_browser(root, arguments):
             "There is no way past this. A change nobody has seen does not leave the draft."])
     if not landed.startswith(f"http://127.0.0.1:{port}"):
         refuse("live-record", [
-            f"{url} left the application and ended at {landed}.",
-            "That is the sign-in bounce: nobody is logged in, so no page can render.",
-            "The checks database has no user. STUB_IDENTITY_PROVIDER=true makes the current user",
-            "User.first, so seed one in the checks worktree and the page renders with no login.",
-            "The gate does not carry a credential and will not accept a page it could not reach."])
+            f"{url} left the application and ended at {landed}, so no page of this change rendered.",
+            "Two things send a request off-host, and the landing url above says which:",
+            "  the sign-in flow, when the current user cannot be established. Check that the server",
+            "  has STUB_IDENTITY_PROVIDER=true and that User.first exists in the checks database.",
+            "  an external host the page itself redirected to, which is the page's own behaviour.",
+            "The gate carries no credential and will not accept a page it could not reach itself."])
     if not status.startswith("2"):
         refuse("live-record", [f"{url} ended at {landed} with HTTP {status}. The page did not render."])
 
