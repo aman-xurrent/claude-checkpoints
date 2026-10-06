@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Prove the change live. You say what to open or run; the gate does it and keeps the result.
+#
+# A session shipped a whole page and wrote "Never seen rendered: all of it". The rule was already
+# in the phase 7 skill, as a checkbox. A checkbox is not a check. So nothing here takes your word:
+# the gate fetches the page itself, and the gate runs `bin/rails runner` itself.
+#
+# Usage:
+#   .claude/bin/live-record --kind browser --path /solutions \
+#       --asserted "<one line: what you looked at and what you saw>" \
+#       [--screenshot <file.png>]
+#
+#   .claude/bin/live-record --kind runner --expression 'puts Solution.count' \
+#       --asserted "<one line: what the output proves>"
+#
+# browser   The gate asks the checks server for that path and stores the status and size. The
+#           server has to be up: start it in ~/work/ipaas_worktrees/checks and drive the page
+#           in a real browser first. Nothing answering means nothing is recorded.
+# runner    The gate runs the ruby in the checks worktree and stores the real stdout. Use this for
+#           code with no rendered surface, where a browser cannot show whether it works.
+#
+# The record is keyed to the current diff. Change the code afterwards and it goes stale, because a
+# change nobody has rendered since is a change nobody has seen. Record it again.
+#
+# A user-facing change with no browser record, or a backend change with no runner record, fails
+# `agent_task_finalize` on phases 5 and 7, and the guard refuses `gh pr ready`. There is no
+# exception path: if the server will not start, fix the worktree.
+#
+# Exit codes: 0 recorded, 2 bad usage or nothing answered, 3 the gate is not installed.
+set -euo pipefail
+
+GATE_PY="${IPAAS_GATE_PY:-$HOME/personal/scripts/gate/gate.py}"
+
+if [[ ! -f "$GATE_PY" ]]; then
+  echo "live-record: gate.py not found at $GATE_PY. Install the verification gate or set IPAAS_GATE_PY." >&2
+  exit 3
+fi
+
+exec python3 "$GATE_PY" live-record "$@"

@@ -81,7 +81,7 @@ MIGRATIONS_DIRECTORY = "platform/db/migrate/"
 # finalize wrapper live next to this file, the protocol and the hooks file are copied when missing.
 LOCAL_SKILLS_DIRECTORY = Path(__file__).resolve().parent / "ipaas-skills"
 LOCAL_SKILL_NAMES = ("phase", "phase-1", "phase-2", "phase-3", "phase-4", "phase-5", "phase-6", "phase-7", "phase-comments")
-LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation", "comment-triage",
+LOCAL_BIN_NAMES = ("agent_task_finalize", "pr-comment", "pr-phase", "review-record", "deviation", "comment-triage", "live-record",
                    "pr-diagram", "pr-create")
 LOCAL_PROTOCOL_FILE = Path(__file__).resolve().parent / "CLAUDE.local.md"
 LOCAL_SETTINGS_FILE = Path(".claude/settings.local.json")
@@ -90,7 +90,7 @@ LOCAL_EXCLUDE_ENTRIES = ("**/.claude/skills/phase", "**/.claude/skills/phase-[1-
                          "**/.claude/bin/agent_task_finalize", "**/.claude/bin/pr-comment", "**/.claude/bin/pr-phase",
                          "**/.claude/bin/review-record", "**/.claude/bin/deviation", "**/.claude/bin/pr-diagram",
                          "**/.claude/bin/pr-create", "**/.claude/bin/comment-triage",
-                         "**/.claude/deviations/", "**/.claude/comments/",
+                         "**/.claude/deviations/", "**/.claude/comments/", "**/.claude/bin/live-record",
                          "/CLAUDE.local.md", "**/.claude/proof/")
 
 # Sub-projects that own an RSpec suite. A declared spec path starts with one of these.
@@ -289,7 +289,7 @@ GUARD_WRITE_PROTECTED = (".claude/proof/runs", ".claude/proof/references", ".cla
 GUARD_ALLOWED_PREFIXES = ("python3 ~/personal/scripts/gate/gate.py ", f"python3 {Path(__file__).resolve()} ",
                           ".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
                           ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram", ".claude/bin/pr-create",
-                          ".claude/bin/comment-triage",
+                          ".claude/bin/comment-triage", ".claude/bin/live-record",
                           "phased handoff", "phased status", "phased logs", "phased adopt")
 # Posting a pull request comment goes through .claude/bin/pr-comment, which stamps the identity header and
 # folds the content into a collapsed block. A raw call carries the account's name and nothing else, so a
@@ -317,7 +317,7 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
 GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks", "rspec",
-                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare",
+                                  "randomized-suite", "surface", "stop", "launch", "trace", "review-record", "review-section", "deviation", "design-links", "figma-compare", "live-record",
                                   "comment-fetch", "comment-decide", "comment-status")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 ZERO_SHA = "0" * 40
@@ -1197,6 +1197,9 @@ def stop_message(root):
     comment_message = comment_stop_message(root)
     if comment_message:
         messages.append(comment_message)
+    live_message = live_stop_message(root)
+    if live_message:
+        messages.append(live_message)
     if code_paths:
         review_message = review_stop_message(root)
         if review_message:
@@ -1790,6 +1793,7 @@ def finalize(arguments):
     checks.append(references_check(root, paths))
     checks.append(review_check(root, paths))
     checks.append(comment_check(root, paths))
+    checks.append(live_check(root, phase, paths))
     print_steps(checks)
     if checks[0][1] == "FAIL":
         sys.exit(2)
@@ -2315,6 +2319,9 @@ def guard():
 
 
 def guard_bash(command):
+    reason = guard_ready(command)
+    if reason:
+        return reason
     for token in GUARD_FORBIDDEN_ANYWHERE:
         if token in command:
             return f"`{token}` skips or changes the gate. Only the user can do that, from their own shell (`!` prefix)."
@@ -2327,6 +2334,23 @@ def guard_bash(command):
         if reason:
             return reason
     return None
+
+
+READY_COMMAND = re.compile(r"\bgh\s+pr\s+ready\b")
+READY_MUTATION = re.compile(r"markPullRequestReadyForReview")
+
+
+def guard_ready(command):
+    """Taking the pull request out of draft is the moment it is offered to a reviewer.
+
+    A session shipped a whole page and wrote "Never seen rendered: all of it", then made it
+    reviewable anyway, because the live check was a checkbox in a skill and nothing read it."""
+    if not (READY_COMMAND.search(command) or READY_MUTATION.search(command)):
+        return None
+    root = repository_root(os.getcwd())
+    if root is None:
+        return None
+    return ready_guard_reason(root)
 
 
 def command_segments(command):
@@ -3764,6 +3788,224 @@ def comment_check(root, paths):
                 ", ".join(thread["token"] for thread in state["undecided"]) + " have no decision from the user yet.")
     return ("comments", "ok", f"{len(state['threads'])} thread(s) decided")
 
+# --------------------------------------------------------------- live checks
+# A session shipped a whole page and wrote "Never seen rendered: all of it." The rule was already
+# in phase-7 step 5 and in its done list as a checkbox, and a checkbox is not a check. So the
+# evidence is produced by the gate, never by the session:
+#
+#   the browser   the gate fetches the page itself and stores what came back
+#   the backend   the gate runs `bin/rails runner` itself and stores the real stdout
+#
+# The session chooses the url and the expression. It never writes the result.
+
+LIVE_DIRECTORY_NAME = "live"
+LIVE_KINDS = ("browser", "runner")
+LIVE_WRAPPER = ".claude/bin/live-record"
+USER_FACING_PREFIXES = FRONTEND_LOGIC + ("platform/app/views/", "platform/app/presenters/",
+                                         "platform/app/helpers/")
+SCREENSHOT_MINIMUM_BYTES = 4096
+LIVE_PHASES = (5, 7)
+
+
+def live_directory(root):
+    return proof_directory(root) / LIVE_DIRECTORY_NAME
+
+
+def user_facing_paths(paths):
+    """What a person can see. The javascript tree is the real interface here: three files in
+    app/views against five hundred components."""
+    return [path for path in paths if path.startswith(USER_FACING_PREFIXES) and is_code_path(path)]
+
+
+def backend_paths(paths):
+    """Code with no rendered surface, so a browser cannot show whether it works."""
+    return [path for path in paths
+            if is_code_path(path) and not path.startswith(USER_FACING_PREFIXES)]
+
+
+def checks_web_port():
+    """The port the checks worktree serves on, read from the slot file the setup wrote."""
+    environment = CHECKS_WORKTREE / WORKTREE_ENVIRONMENT_FILE
+    if not environment.is_file():
+        return None
+    match = re.search(r"^export WEB_PORT=(\d+)", environment.read_text(), re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
+def live_state(root, patch_sha=None):
+    """What has been proved live against the diff as it stands now.
+
+    Keyed on the patch like the review records, so a code change after the page was rendered makes
+    the evidence stale. That is the case the user named: a change made after phase 7 has not been
+    seen, whatever was rendered before it."""
+    current = patch_sha or patch_digest(snapshot_patch(root))
+    state = {}
+    for kind in LIVE_KINDS:
+        record = read_json(live_directory(root) / f"{kind}.json")
+        if record is None:
+            state[kind] = ("missing", None)
+        elif record.get("patch_sha") != current:
+            state[kind] = ("stale", record)
+        else:
+            state[kind] = ("ok", record)
+    return state
+
+
+def live_record(arguments):
+    """Prove the change live. The session names what to open or run; the gate does it.
+
+    Nothing here takes the session's word. The page is fetched by the gate, the runner expression
+    is executed by the gate, and the stored record carries what actually came back."""
+    root = require_repository("live-record")
+    kind = argument_value(arguments, "--kind")
+    if kind not in LIVE_KINDS:
+        refuse("live-record", [f"--kind must be one of {', '.join(LIVE_KINDS)}"])
+    record = live_browser(root, arguments) if kind == "browser" else live_runner(root, arguments)
+    record["patch_sha"] = patch_digest(snapshot_patch(root))
+    record["recorded_at"] = now_iso()
+    directory = live_directory(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    write_json(directory / f"{kind}.json", record)
+    print(f"live-record: {kind} recorded against patch {record['patch_sha'][:12]}.")
+    for line in record.get("summary", []):
+        print(f"  {line}")
+
+
+def live_browser(root, arguments):
+    """Fetch the page the session says it drove, and keep what came back.
+
+    A screenshot on its own proves nothing: a session can write a png. So the gate asks the server
+    for the page at record time. If the server is not up, there is no record, and there is no way
+    to write one by hand."""
+    path = argument_value(arguments, "--path")
+    asserted = argument_value(arguments, "--asserted")
+    screenshot = argument_value(arguments, "--screenshot")
+    problems = []
+    if not path or not path.startswith("/"):
+        problems.append("--path wants the page path the browser was on, for example /solutions")
+    if not asserted:
+        problems.append("--asserted wants one line saying what you looked at and what you saw")
+    port = checks_web_port()
+    if port is None:
+        problems.append(f"no WEB_PORT in {CHECKS_WORKTREE / WORKTREE_ENVIRONMENT_FILE}; run gate.py setup-checks")
+    if problems:
+        refuse("live-record", problems)
+
+    url = f"http://127.0.0.1:{port}{path}"
+    done = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code} %{size_download}",
+                           "--max-time", "20", url], capture_output=True, text=True)
+    answer = (done.stdout or "").split()
+    status = answer[0] if answer else "000"
+    size = int(answer[1]) if len(answer) > 1 and answer[1].isdigit() else 0
+    if status == "000":
+        refuse("live-record", [
+            f"nothing answered on {url}. The page was never rendered, so there is nothing to record.",
+            "Start the server in the checks worktree, drive the page, then record it.",
+            "There is no way past this. A change nobody has seen does not leave the draft."])
+    if not status.startswith("2"):
+        refuse("live-record", [f"{url} answered HTTP {status}. The page did not render."])
+
+    summary = [f"{url} answered HTTP {status}, {size} bytes", f"asserted: {asserted}"]
+    record = {"kind": "browser", "url": url, "path": path, "http_status": status,
+              "bytes": size, "asserted": asserted, "summary": summary}
+    if screenshot:
+        shot = Path(screenshot).expanduser()
+        if not shot.is_file():
+            refuse("live-record", [f"--screenshot {shot} does not exist"])
+        if shot.stat().st_size < SCREENSHOT_MINIMUM_BYTES:
+            refuse("live-record", [f"--screenshot {shot} is {shot.stat().st_size} bytes, too small to be a page"])
+        record["screenshot"] = str(shot)
+        record["screenshot_bytes"] = shot.stat().st_size
+        summary.append(f"screenshot {shot} ({shot.stat().st_size} bytes)")
+    return record
+
+
+def live_runner(root, arguments):
+    """Run the expression through `bin/rails runner` in the checks worktree and keep the output.
+
+    The session writes the expression. The gate runs it and stores the real stdout, the way a pull
+    request comment only reaches the thread through the wrapper that stamps it."""
+    expression = argument_value(arguments, "--expression")
+    asserted = argument_value(arguments, "--asserted")
+    problems = []
+    if not expression:
+        problems.append("--expression wants the ruby to run, for example 'puts Solution.count'")
+    if not asserted:
+        problems.append("--asserted wants one line saying what the output proves")
+    if not (CHECKS_WORKTREE / "platform").is_dir():
+        problems.append(f"no checks worktree at {CHECKS_WORKTREE}; run gate.py setup-checks")
+    if problems:
+        refuse("live-record", problems)
+
+    done = subprocess.run(["bin/rails", "runner", expression],
+                          cwd=str(CHECKS_WORKTREE / "platform"), env=checks_environment(),
+                          capture_output=True, text=True, timeout=RSPEC_TIMEOUT_SECONDS)
+    output = (done.stdout or "") + (done.stderr or "")
+    if done.returncode != 0:
+        refuse("live-record", [f"`bin/rails runner` exited {done.returncode}. Nothing is recorded.",
+                               *output.strip().splitlines()[-8:]])
+    summary = [f"bin/rails runner exited 0", f"asserted: {asserted}"]
+    return {"kind": "runner", "expression": expression, "exit_code": done.returncode,
+            "output": output[-4000:], "asserted": asserted, "summary": summary}
+
+
+def live_check(root, phase, paths):
+    """What the diff needs seen, and whether it has been.
+
+    Bound at phase 5 and phase 7, and on any code change made after phase 7, because evidence is
+    keyed to the patch: a change nobody has rendered since is a change nobody has seen."""
+    facing = user_facing_paths(paths)
+    backend = backend_paths(paths)
+    if not facing and not backend:
+        return ("live", "skip", "no code changed")
+    if phase is not None and phase < 5:
+        return ("live", "skip", f"phase {phase} ships no behaviour to render")
+
+    state = live_state(root)
+    problems = []
+    if facing:
+        status, _record = state["browser"]
+        if status != "ok":
+            problems.append(
+                f"{len(facing)} user-facing file(s) changed and no page has been rendered"
+                + (" since the last edit" if status == "stale" else "")
+                + f": {', '.join(facing[:3])}"
+                + (f" and {len(facing) - 3} more" if len(facing) > 3 else ""))
+    if backend:
+        status, _record = state["runner"]
+        if status != "ok":
+            problems.append(
+                f"{len(backend)} backend file(s) changed and nothing has been run against them"
+                + (" since the last edit" if status == "stale" else "")
+                + f": {', '.join(backend[:3])}"
+                + (f" and {len(backend) - 3} more" if len(backend) > 3 else ""))
+    if problems:
+        return ("live", "FAIL", "; ".join(problems) + f". Record it with {LIVE_WRAPPER}.")
+    proved = [kind for kind in LIVE_KINDS if state[kind][0] == "ok"]
+    return ("live", "ok", f"{', '.join(proved)} proved against this diff")
+
+
+def live_stop_message(root):
+    paths = changed_files_all(root, diff_base(root))
+    name, status, detail = live_check(root, phase_number(root), paths)
+    if status != "FAIL":
+        return None
+    return (f"{detail} A change nobody has seen does not leave the draft.")
+
+
+def ready_guard_reason(root):
+    """`gh pr ready` is the moment the work is offered to a reviewer. Nothing owned it before, so a
+    page nobody had rendered became reviewable with one command."""
+    paths = changed_files_all(root, diff_base(root))
+    name, status, detail = live_check(root, phase_number(root), paths)
+    if status != "FAIL":
+        return None
+    return (f"the pull request stays a draft. {detail}\n"
+            f"  Start the server in the checks worktree, drive the page or run the expression, and "
+            f"record it. The gate fetches the page and runs the runner itself, so there is nothing "
+            f"to write by hand and no way past this.")
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -3797,6 +4039,7 @@ def main(argv):
         "comment-fetch": lambda: comment_fetch(arguments),
         "comment-decide": lambda: comment_decide(arguments),
         "comment-status": lambda: comment_status(arguments),
+        "live-record": lambda: live_record(arguments),
     }
     if command not in dispatch:
         print(f"unknown subcommand {command}\n{__doc__}")

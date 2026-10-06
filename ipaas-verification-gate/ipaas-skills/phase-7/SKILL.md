@@ -40,7 +40,10 @@ and on rubocop, yarn, spec, proof or reference failures.
 - [ ] No unapproved phase 2 to 4 contract change was needed.
 - [ ] Phase 6 assertions still hold.
 - [ ] Specs reviewed by the spec-reviewer agent; `agent_task_finalize --phase 7` exits 0 with the proof `pass`.
-- [ ] Live check done and recorded with screenshots in the PR description.
+- [ ] Live check **recorded through `.claude/bin/live-record`**, not asserted. A user-facing change
+      needs `--kind browser` and a backend change needs `--kind runner`. The gate fetches the page
+      and runs the ruby itself, so this cannot be ticked without doing it, and `gh pr ready` is
+      refused until it is recorded.
 - [ ] PR taken out of draft: `GH_HOST=git.4me.com gh pr ready <n>`.
 - [ ] Xurrent request fields (review, requirement, design, risk analysis, risk level) and the test plan
       filled following steps 3 to 7 of `.claude/skills/create-pr/SKILL.md`.

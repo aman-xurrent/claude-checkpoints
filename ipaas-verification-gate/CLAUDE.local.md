@@ -105,6 +105,47 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
   which stamps who posted it and folds the body into a collapsed block. `gh pr comment`, `gh pr review` and
   the comment API are denied, because a raw post is indistinguishable from one the user wrote.
 
+## Nothing leaves the draft unseen
+
+A session shipped an entire page and wrote, when pressed: *"Never seen rendered: all of it."* It had
+run the unit tests, the type check, rubocop and the revert proof, and it had ticked the phase 7 live
+checkbox. A checkbox is not a check.
+
+**A user-facing change must be driven in a real browser. A change with no rendered surface must be
+run through `bin/rails runner`.** Both are recorded, and the gate produces the evidence:
+
+```
+.claude/bin/live-record --kind browser --path /solutions \
+    --asserted "the list drew five rows and the empty screen showed on a no-match search" \
+    --screenshot /tmp/solutions.png
+
+.claude/bin/live-record --kind runner --expression 'puts Solution.order(:id).pluck(:name).inspect' \
+    --asserted "the exporter returns the five seeded names in order"
+```
+
+You choose the page and the expression. You never write the result. The gate asks the checks server
+for that page itself and stores the status and the size, and it runs the ruby itself and stores the
+real stdout. A screenshot alone proves nothing, because a session can write a png.
+
+Which browser does not matter: Chrome through its MCP, Playwright, anything that drives a real page.
+What matters is that the server answered when the record was taken.
+
+**The record is keyed to the diff.** Change the code afterwards and it goes stale, because a change
+nobody has rendered since is a change nobody has seen. Record it again. That covers the edit made
+after phase 7 as much as the first one.
+
+Where it binds:
+
+- `agent_task_finalize` fails on phase 5 and phase 7 without it. Phases 1 to 4 ship no behaviour to
+  render and are skipped.
+- **The guard refuses `gh pr ready` and the `markPullRequestReadyForReview` mutation.** Taking the
+  pull request out of draft is the moment the work is offered to a reviewer, and nothing owned that
+  moment before.
+
+**There is no exception path.** If the checks worktree will not boot, fix the worktree. A slot
+problem is not permission to ship a change nobody has seen, and a skip here would become the way
+every live check gets skipped.
+
 ## Review skills (three, every session that changed code)
 
 Three skills look at every code change. Run all three whenever the session changed code, not only at
