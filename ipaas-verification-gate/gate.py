@@ -3805,6 +3805,8 @@ LIVE_WRAPPER = ".claude/bin/live-record"
 USER_FACING_PREFIXES = FRONTEND_LOGIC + ("platform/app/views/", "platform/app/presenters/",
                                          "platform/app/helpers/")
 SCREENSHOT_MINIMUM_BYTES = 4096
+# Local work runs against this account. Everything redirects to the picker until one is chosen.
+LIVE_ACCOUNT = os.environ.get("IPAAS_LIVE_ACCOUNT", "xurrent")
 LIVE_PHASES = (5, 7)
 
 
@@ -3896,8 +3898,11 @@ def live_browser(root, arguments):
     # Redirects are followed, because this application redirects by design: every page carries
     # redirect_to_pick_solution, so refusing a 302 refused a page that renders perfectly well. What
     # matters is where the chain ends, not that it moved.
-    headers_path = Path(tempfile.mkdtemp(prefix="live-record-")) / "headers.txt"
+    work = Path(tempfile.mkdtemp(prefix="live-record-"))
+    headers_path = work / "headers.txt"
+    jar = pick_account(work, port, argument_value(arguments, "--account", LIVE_ACCOUNT))
     done = subprocess.run(["curl", "-sL", "-o", "/dev/null", "-D", str(headers_path),
+                           "-b", str(jar), "-c", str(jar),
                            "-w", "%{http_code} %{size_download} %{num_redirects} %{url_effective}",
                            "--max-time", "30", url], capture_output=True, text=True)
     answer = (done.stdout or "").split()
@@ -3963,6 +3968,49 @@ def live_browser(root, arguments):
         record["screenshot_bytes"] = shot.stat().st_size
         summary.append(f"screenshot {shot} ({shot.stat().st_size} bytes)")
     return record
+
+
+def pick_account(work, port, account):
+    """Start a session and choose the account, the way a person does before any page will render.
+
+    Every page redirects to the account picker until one is chosen, so an unauthenticated fetch
+    only ever sees the picker. The gate drives the picker itself: it is two requests and it holds
+    no credential, so nothing is handed to it that it has to trust."""
+    jar = work / "cookies.txt"
+    picker = work / "picker.html"
+    base = f"http://127.0.0.1:{port}"
+    subprocess.run(["curl", "-s", "-c", str(jar), "-o", str(picker), "--max-time", "30",
+                    f"{base}/pick_account"], capture_output=True, text=True)
+    token = ""
+    if picker.is_file():
+        match = re.search(r'name="csrf-token"\s+content="([^"]+)"', picker.read_text(errors="replace"))
+        token = match.group(1) if match else ""
+
+    command = ["curl", "-s", "-b", str(jar), "-c", str(jar), "-o", "/dev/null",
+               "-w", "%{http_code} %{redirect_url}", "--max-time", "30", "-X", "POST",
+               "-d", f"sitename={account}"]
+    if token:
+        command += ["-H", f"X-CSRF-Token: {token}"]
+    command.append(f"{base}/pick_account")
+    done = subprocess.run(command, capture_output=True, text=True)
+    answer = (done.stdout or "").split()
+    status = answer[0][-3:] if answer else "000"
+    went_to = answer[1] if len(answer) > 1 else ""
+    if status == "429":
+        refuse("live-record", [
+            f"{base} is rate limiting the account picker (HTTP 429). Wait, then record again."])
+    if not status.startswith("3"):
+        refuse("live-record", [
+            f"could not pick the {account} account on {base}: the picker answered HTTP {status}.",
+            "Until an account is chosen every page redirects to the picker, so nothing can render."])
+    # A sitename the application does not know sends you back to the picker instead of onward.
+    if went_to.endswith("/pick_account"):
+        refuse("live-record", [
+            f"the application does not know an account with sitename '{account}': the picker sent "
+            f"the request straight back to itself.",
+            f"Run `bin/rails runner 'puts Account.pluck(:sitename).inspect'` in the checks worktree "
+            f"to see which names exist."])
+    return jar
 
 
 def live_runner(root, arguments):

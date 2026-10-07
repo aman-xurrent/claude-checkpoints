@@ -132,7 +132,13 @@ What matters is that the server answered when the record was taken.
 
 Redirects are followed, because this application redirects by design: every page carries
 `redirect_to_pick_solution`, so a 302 is normal and the chain is what counts. The record keeps where
-it landed. **The request must end on the path it asked for**, and the answer must carry the `x-request-id` and
+it landed. **The gate picks the `xurrent` account first.** Every page redirects to the account picker until an
+account is chosen, so an unauthenticated fetch only ever sees the picker. The gate drives the picker
+itself, which is two requests and holds no credential: it reads the CSRF token off the picker page
+and posts `sitename=xurrent`. `--account <name>` overrides it, and `IPAAS_LIVE_ACCOUNT` sets the
+default. A name the application does not know is refused by name.
+
+**The request must end on the path it asked for**, and the answer must carry the `x-request-id` and
 `x-runtime` headers that Rails sets on every response. Asking for the solutions list and arriving at
 the account picker is a 200, and recording it would say a page was seen that nobody saw. The header
 check is there because anything can listen on a port and answer 200: a stub left on the checks port
