@@ -132,7 +132,14 @@ What matters is that the server answered when the record was taken.
 
 Redirects are followed, because this application redirects by design: every page carries
 `redirect_to_pick_solution`, so a 302 is normal and the chain is what counts. The record keeps where
-it landed. A chain that leaves `127.0.0.1` means no page of the change rendered, and the landing url says why:
+it landed. **The request must end on the path it asked for**, and the answer must carry the `x-request-id` and
+`x-runtime` headers that Rails sets on every response. Asking for the solutions list and arriving at
+the account picker is a 200, and recording it would say a page was seen that nobody saw. The header
+check is there because anything can listen on a port and answer 200: a stub left on the checks port
+answered every request with 813 bytes for eight hours, kept Rails from binding, and would have been
+recorded as a rendered page.
+
+A chain that leaves `127.0.0.1` means no page of the change rendered, and the landing url says why:
 either the sign-in flow, when the current user cannot be established (check that the server has
 `STUB_IDENTITY_PROVIDER=true` and that `User.first` exists in the checks database), or an external
 host the page itself redirects to. The gate carries no credential and will not accept a page it

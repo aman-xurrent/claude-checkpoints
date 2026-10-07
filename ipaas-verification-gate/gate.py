@@ -52,6 +52,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
 import traceback
@@ -3895,7 +3896,8 @@ def live_browser(root, arguments):
     # Redirects are followed, because this application redirects by design: every page carries
     # redirect_to_pick_solution, so refusing a 302 refused a page that renders perfectly well. What
     # matters is where the chain ends, not that it moved.
-    done = subprocess.run(["curl", "-sL", "-o", "/dev/null",
+    headers_path = Path(tempfile.mkdtemp(prefix="live-record-")) / "headers.txt"
+    done = subprocess.run(["curl", "-sL", "-o", "/dev/null", "-D", str(headers_path),
                            "-w", "%{http_code} %{size_download} %{num_redirects} %{url_effective}",
                            "--max-time", "30", url], capture_output=True, text=True)
     answer = (done.stdout or "").split()
@@ -3903,6 +3905,7 @@ def live_browser(root, arguments):
     size = int(answer[1]) if len(answer) > 1 and answer[1].isdigit() else 0
     redirects = int(answer[2]) if len(answer) > 2 and answer[2].isdigit() else 0
     landed = answer[3] if len(answer) > 3 else url
+    headers = headers_path.read_text(errors="replace") if headers_path.is_file() else ""
 
     if status == "000":
         refuse("live-record", [
@@ -3919,6 +3922,30 @@ def live_browser(root, arguments):
             "The gate carries no credential and will not accept a page it could not reach itself."])
     if not status.startswith("2"):
         refuse("live-record", [f"{url} ended at {landed} with HTTP {status}. The page did not render."])
+
+    # Anything can listen on a port and answer 200. A stub of mine sat on this one for eight hours
+    # answering every request with 813 bytes, kept Rails from binding, and would have been recorded
+    # as a rendered page. These two headers come from ActionDispatch::RequestId and Rack::Runtime,
+    # so an answer without them is not this application.
+    if not re.search(r"(?mi)^x-request-id:", headers) or not re.search(r"(?mi)^x-runtime:", headers):
+        refuse("live-record", [
+            f"{landed} answered HTTP {status}, but without the x-request-id and x-runtime headers "
+            f"that Rails sets on every response.",
+            "Something other than the application is listening on this port. Find it with",
+            f"  lsof -nP -iTCP:{port} -sTCP:LISTEN",
+            "and stop it, then start the server in the checks worktree."])
+
+    # Landing somewhere else means the page under test never rendered. Asking for the solutions
+    # list and arriving at the account picker is a 200, and recording it would say a page was seen
+    # that nobody saw.
+    landed_path = re.sub(r"^https?://[^/]+", "", landed).split("?")[0] or "/"
+    if landed_path.rstrip("/") != path.split("?")[0].rstrip("/"):
+        refuse("live-record", [
+            f"{url} ended at {landed_path}, not at {path}.",
+            "The page under test never rendered: the application sent the request somewhere else,",
+            "which usually means it will not show that page in this state.",
+            "Record the page you actually reached, or put the application in the state that shows",
+            "this one. A 200 from a different page is not evidence about this one."])
 
     summary = [f"{url} -> {landed} HTTP {status}, {size} bytes"
                + (f", {redirects} redirect(s)" if redirects else ""),
