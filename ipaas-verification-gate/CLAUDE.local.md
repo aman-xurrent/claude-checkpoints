@@ -287,8 +287,26 @@ request, in the phased loop or not:
    `R:IN` means fix it in this pull request. `R:OUT` means it stays out of this pull request: raise
    it as a separate request. `R:<text>` is an instruction: do what it says and answer it in chat.
 
-**The gate holds every edit to code and specs while any comment has no mark.** The user lifts it by
-marking the diagram. There is no other way through, and the gate never decides for them. A mark that
+**The user may answer in chat instead of on the drawing**, and often will. Record it with their own
+words beside it:
+
+```
+.claude/bin/comment-triage decide --pr <n> --token C4 --verdict fix-in-this-pr \
+    --evidence "yes fix the scrubber one here, the rest go in their own request"
+```
+
+`--verdict` is one of `fix-in-this-pr`, `separate-request`, `follow-the-user's-words`. `--evidence`
+is the user's own words, quoted, never your summary of them: the quote is what makes the decision
+checkable later. The record keeps which way it came, `chat` or `marks`.
+
+This path exists because the drawing is a file you can write. A decision spoken in chat was being
+transcribed into a mark and read back as though the user had drawn it, which works and hides where
+the decision came from. Do not do that any more: record chat as chat. **Never write a mark on the
+drawing yourself.** A mark is the user's, and one you typed is indistinguishable from one they did.
+
+**The gate holds every edit to code and specs while any comment has no decision.** The user lifts it,
+by marking the drawing or by saying it in chat. There is no other way through, and the gate never
+decides for them. A mark that
 names no `C<n>` records nothing and the command refuses: a decision written against the wrong comment
 is worse than no decision, because nothing later shows it went to the wrong place. When a reviewer
 replies again on a thread, its earlier decision stops counting and the user sees it again.

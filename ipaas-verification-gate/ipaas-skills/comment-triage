@@ -11,7 +11,13 @@
 #
 #   fetch    store every unresolved thread with the reviewer's own words, and print the list.
 #            Each thread gets a token, C1, C2, C3, which names its column in the diagram.
-#   decide   read the marks and record one decision per thread.
+#   decide   record one decision per thread, from the user's marks or from what they said:
+#              --marks <file>  reads the R: marks the user typed on the drawing
+#              --token C4 --verdict <v> --evidence "<their own words>"  records a chat answer
+#            Verdicts: fix-in-this-pr, separate-request, follow-the-user's-words.
+#            The drawing is a file this tool can write, so a chat answer is recorded as a chat
+#            answer and never transcribed into a mark. Never write a mark yourself: a mark you
+#            typed cannot be told apart from one the user typed.
 #            R:IN   -> fix it in this pull request.
 #            R:OUT  -> out of this pull request; raise it as a separate request.
 #            R:<text> -> do what the text says, and answer it in chat.

@@ -198,6 +198,9 @@ COMMENTS_PATH = Path(".claude/comments")
 COMMENT_FIX = "fix-in-this-pr"
 COMMENT_SEPARATE = "separate-request"
 COMMENT_REPLY = "follow-the-user's-words"
+COMMENT_VERDICTS = (COMMENT_FIX, COMMENT_SEPARATE, COMMENT_REPLY)
+# A decision given in chat is only checkable if the user's own words come with it.
+EVIDENCE_MINIMUM_CHARACTERS = 12
 TRIAGE_WRAPPER = ".claude/bin/comment-triage"
 MARKS_READER = Path.home() / "personal/scripts/excalidraw-marks"
 GITHUB_HOST = os.environ.get("GH_HOST", "git.4me.com")
@@ -3663,12 +3666,19 @@ def comment_decide(arguments):
     root = require_repository("comment-triage decide")
     pr = pull_request_number(root, argument_value(arguments, "--pr"))
     marks_file = argument_value(arguments, "--marks")
-    if not pr or not marks_file:
-        refuse("comment-triage decide", ["usage: comment-triage decide --pr N --marks <file.excalidraw|file.svg>"])
+    token = argument_value(arguments, "--token")
+    if not pr or not (marks_file or token):
+        refuse("comment-triage decide", [
+            "usage: comment-triage decide --pr N --marks <file.excalidraw|file.svg>",
+            "   or: comment-triage decide --pr N --token C4 --verdict <verdict> --evidence \"<their words>\"",
+            f"verdicts: {', '.join(COMMENT_VERDICTS)}"])
     stored = read_json(comments_directory(root, pr) / "threads.json", default={}) or {}
     threads = stored.get("threads") or []
     if not threads:
         refuse("comment-triage decide", [f"no thread list for pull request {pr}. Run `comment-triage fetch` first."])
+    if token:
+        comment_decide_from_chat(root, pr, threads, arguments)
+        return
 
     marks, problem = read_marks(marks_file)
     if problem:
@@ -3693,7 +3703,7 @@ def comment_decide(arguments):
         decisions[thread["id"]] = {
             "token": token, "verdict": verdict_of_mark(mark), "instruction": mark["reply"],
             "path": thread["path"], "line": thread["line"], "decided_at": now_iso(),
-            "marks_file": str(Path(marks_file).expanduser()),
+            "source": "marks", "marks_file": str(Path(marks_file).expanduser()),
         }
         recorded.append((token, decisions[thread["id"]]["verdict"], mark["reply"]))
 
@@ -3704,6 +3714,46 @@ def comment_decide(arguments):
     for token, verdict, reply in recorded:
         print(f"  {token}  {verdict}" + (f"  \"{reply}\"" if verdict == COMMENT_REPLY else ""))
     undecided = [thread["token"] for thread in threads if thread["id"] not in decisions]
+    print(f"  still waiting: {', '.join(undecided)}" if undecided else "  every thread has a decision.")
+
+
+def comment_decide_from_chat(root, pr, threads, arguments):
+    """Record a decision the user gave in conversation instead of on the drawing.
+
+    The drawing was the only way in, and the drawing is a file this tool can write, so a decision
+    spoken in chat was being transcribed into a mark and read back as though the user had drawn it.
+    That works, and it hides where the decision came from. This records the same decision and keeps
+    the user's own words beside it, the way a deliberate design difference is recorded.
+
+    It is weaker evidence than a mark the user typed, and it is meant to be: the quoted words are
+    what makes it checkable, so a decision with nothing quoted is refused."""
+    token = argument_value(arguments, "--token")
+    verdict = argument_value(arguments, "--verdict")
+    evidence = argument_value(arguments, "--evidence")
+    note = argument_value(arguments, "--note", "")
+    by_token = {thread["token"]: thread for thread in threads}
+    problems = []
+    if token not in by_token:
+        problems.append(f"--token {token} is not on this pull request's list ({', '.join(sorted(by_token))})")
+    if verdict not in COMMENT_VERDICTS:
+        problems.append(f"--verdict must be one of {', '.join(COMMENT_VERDICTS)}")
+    if not evidence or len(evidence.strip()) < EVIDENCE_MINIMUM_CHARACTERS:
+        problems.append(f"--evidence wants the user's own words, quoted, at least "
+                        f"{EVIDENCE_MINIMUM_CHARACTERS} characters. Not your summary of them: the quote is "
+                        f"what makes this checkable later.")
+    if problems:
+        refuse("comment-triage decide", problems)
+
+    thread = by_token[token]
+    decisions = decisions_of(root, pr)
+    decisions[thread["id"]] = {
+        "token": token, "verdict": verdict, "instruction": note or evidence,
+        "path": thread["path"], "line": thread["line"], "decided_at": now_iso(),
+        "source": "chat", "evidence": evidence}
+    write_json(comments_directory(root, pr) / "decisions.json", decisions)
+    print(f"comment-triage: recorded {token} as {verdict} from what the user said.")
+    print(f'  their words: "{evidence.strip()[:160]}"')
+    undecided = [each["token"] for each in threads if each["id"] not in decisions]
     print(f"  still waiting: {', '.join(undecided)}" if undecided else "  every thread has a decision.")
 
 
@@ -3766,7 +3816,9 @@ def comment_guard_reason(root):
         return None
     waiting = ", ".join(f"{thread['token']} ({thread['path']}:{thread['line']})" for thread in state["undecided"][:6])
     return (f"{len(state['undecided'])} review comment(s) on pull request {state['pr']} have no decision yet: {waiting}. "
-            f"Draw the triage diagram, then wait for the R: marks and run `{TRIAGE_WRAPPER} decide`. "
+            f"Draw the triage diagram, then wait. The user answers either on the drawing, read with "
+            f"`{TRIAGE_WRAPPER} decide --marks <file>`, or in chat, recorded with "
+            f"`{TRIAGE_WRAPPER} decide --token <C> --verdict <v> --evidence \"<their words>\"`. "
             f"You do not decide these; the user does.")
 
 
