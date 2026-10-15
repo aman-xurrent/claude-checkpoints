@@ -1258,8 +1258,35 @@ def surface():
     protocol = phase_protocol_line(root, payload.get("prompt") or payload.get("user_prompt") or "")
     if protocol:
         lines.append(protocol)
+    decision = comment_decision_line(root, payload.get("prompt") or payload.get("user_prompt") or "")
+    if decision:
+        lines.append(decision)
     if lines:
         print("\n".join(lines))
+
+
+def comment_decision_line(root, prompt):
+    """When review comments are waiting and this message answers one, say so at once.
+
+    The user should not have to run anything. They answer in their own words, in chat, and the
+    session records it while the words are still in front of it. Nothing here reads a verdict out
+    of the message: guessing which comment the user meant is the one mistake worth more than the
+    convenience, so the message only tells the session to record what it can see and to ask when it
+    cannot tell."""
+    state = comment_state(root)
+    if not state or not state["undecided"] or not (prompt or "").strip():
+        return None
+    waiting = ", ".join(
+        f"{thread['token']} ({thread['path']}:{thread['line']})" for thread in state["undecided"][:8])
+    return (f"gate: {len(state['undecided'])} review comment(s) on pull request {state['pr']} are waiting "
+            f"for a decision: {waiting}. If the message above answers any of them, record it now, "
+            f"before anything else, one call per comment:\n"
+            f"  {TRIAGE_WRAPPER} decide --pr {state['pr']} --token <C> --verdict <verdict> "
+            f"--evidence \"<the user's words, verbatim>\"\n"
+            f"  verdicts: {', '.join(COMMENT_VERDICTS)}\n"
+            f"Quote them word for word, never your summary. If you cannot tell which comment they "
+            f"meant, ask which one rather than guess: a decision recorded against the wrong comment "
+            f"is worse than none, because nothing later shows it went to the wrong place.")
 
 
 def phase_protocol_line(root, prompt):

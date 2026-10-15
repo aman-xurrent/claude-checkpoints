@@ -287,8 +287,10 @@ request, in the phased loop or not:
    `R:IN` means fix it in this pull request. `R:OUT` means it stays out of this pull request: raise
    it as a separate request. `R:<text>` is an instruction: do what it says and answer it in chat.
 
-**The user may answer in chat instead of on the drawing**, and often will. Record it with their own
-words beside it:
+**The user may answer in chat instead of on the drawing**, and often will. They run nothing: while
+any comment is waiting, every prompt carries a `gate:` line listing the open ones, so when their
+message answers one you record it straight away, before anything else, with their own words beside
+it:
 
 ```
 .claude/bin/comment-triage decide --pr <n> --token C4 --verdict fix-in-this-pr \
@@ -298,6 +300,10 @@ words beside it:
 `--verdict` is one of `fix-in-this-pr`, `separate-request`, `follow-the-user's-words`. `--evidence`
 is the user's own words, quoted, never your summary of them: the quote is what makes the decision
 checkable later. The record keeps which way it came, `chat` or `marks`.
+
+If their message does not say which comment it answers, ask which one. Never guess: a decision
+recorded against the wrong comment is worse than no decision, because nothing later shows it went
+to the wrong place.
 
 This path exists because the drawing is a file you can write. A decision spoken in chat was being
 transcribed into a mark and read back as though the user had drawn it, which works and hides where
