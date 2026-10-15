@@ -3824,8 +3824,15 @@ def comment_state(root):
     stored = read_json(comments_directory(root, pr) / "threads.json", default={}) or {}
     threads = stored.get("threads") or []
     decisions = decisions_of(root, pr)
-    undecided = [thread for thread in threads if thread["id"] not in decisions]
-    return {"pr": pr, "threads": threads, "decisions": decisions, "undecided": undecided}
+    open_threads = [thread for thread in threads if thread["id"] not in decisions]
+    # An outdated thread points at code that has since changed or gone, which is why the standing
+    # rule for "what is still outstanding" excludes them. Three of them, all on S3 code that had
+    # been deleted, held every edit on a branch. They stay on the list so nothing is lost, and they
+    # hold nothing.
+    undecided = [thread for thread in open_threads if not thread.get("outdated")]
+    outdated = [thread for thread in open_threads if thread.get("outdated")]
+    return {"pr": pr, "threads": threads, "decisions": decisions,
+            "undecided": undecided, "outdated": outdated}
 
 
 def comment_status(arguments):
@@ -3851,12 +3858,22 @@ def comment_guard_reason(root):
 
 def comment_stop_message(root):
     state = comment_state(root)
-    if not state or not state["undecided"]:
+    if not state:
         return None
-    return (f"{len(state['undecided'])} of {len(state['threads'])} review comment(s) on pull request {state['pr']} "
-            f"are still waiting for the user's decision: "
+    lines = []
+    if state["undecided"]:
+        lines.append(
+            f"{len(state['undecided'])} of {len(state['threads'])} review comment(s) on pull request "
+            f"{state['pr']} are still waiting for the user's decision: "
             + ", ".join(thread["token"] for thread in state["undecided"])
-            + f". Nothing is fixed until they are marked.")
+            + ". Nothing is fixed until they are decided.")
+    if state["outdated"]:
+        lines.append(
+            f"{len(state['outdated'])} thread(s) are open but outdated, so they hold nothing: "
+            + ", ".join(f"{thread['token']} ({thread['path']})" for thread in state["outdated"])
+            + ". The code they point at has changed or gone. Answer them on the pull request when "
+              "you are there, or decide them like any other.")
+    return "\n".join(lines) if lines else None
 
 
 def comment_check(root, paths):
@@ -3866,7 +3883,8 @@ def comment_check(root, paths):
     if state["undecided"]:
         return ("comments", "FAIL",
                 ", ".join(thread["token"] for thread in state["undecided"]) + " have no decision from the user yet.")
-    return ("comments", "ok", f"{len(state['threads'])} thread(s) decided")
+    outdated = f", {len(state['outdated'])} outdated and holding nothing" if state["outdated"] else ""
+    return ("comments", "ok", f"{len(state['threads'])} thread(s) decided{outdated}")
 
 # --------------------------------------------------------------- live checks
 # A session shipped a whole page and wrote "Never seen rendered: all of it." The rule was already

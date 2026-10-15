@@ -312,7 +312,13 @@ drawing yourself.** A mark is the user's, and one you typed is indistinguishable
 
 **The gate holds every edit to code and specs while any comment has no decision.** The user lifts it,
 by marking the drawing or by saying it in chat. There is no other way through, and the gate never
-decides for them. A mark that
+decides for them.
+
+**An outdated thread holds nothing.** GitHub marks a thread outdated when the code it points at has
+changed or gone, and the standing rule for what is still outstanding is `isResolved == false and
+isOutdated == false`. The gate used to hold on outdated threads too, and three of them, all on S3
+code that had already been deleted, blocked every edit on a branch. They stay on the list and in the
+Stop message so nothing is lost. Answer them on the pull request, or decide them like any other. A mark that
 names no `C<n>` records nothing and the command refuses: a decision written against the wrong comment
 is worse than no decision, because nothing later shows it went to the wrong place. When a reviewer
 replies again on a thread, its earlier decision stops counting and the user sees it again.
