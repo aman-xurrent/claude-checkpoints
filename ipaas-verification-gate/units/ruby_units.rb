@@ -23,6 +23,7 @@ SCOPES = [Prism::DefNode, Prism::ClassNode, Prism::ModuleNode].freeze
 # method name is behaviour, and is judged.
 INTERPOLATIONS = [Prism::EmbeddedStatementsNode, Prism::InterpolatedStringNode, Prism::InterpolatedSymbolNode].freeze
 LOG_CALLS = %w[debug info warn error fatal log puts print p].freeze
+LOGGER_RECEIVER = /(?:\A|\.)@?logger\z/
 # A heredoc's body sits after the line that opens it, outside the node, so removing the node leaves the body
 # behind as code that still parses and then fails to run, which reads as a kill.
 HEREDOC_OPENER = /<<[~-]?(["'`]?)[A-Za-z_]\w*\1/
@@ -71,10 +72,21 @@ def scope_of(ancestors)
   ancestors.select { |node| SCOPES.any? { |kind| node.is_a?(kind) } }.map { |node| node.name.to_s }.join("#")
 end
 
-def inside_log_text?(ancestors)
-  return false unless ancestors.any? { |ancestor| INTERPOLATIONS.any? { |kind| ancestor.is_a?(kind) } }
+# A log call is one on a logger (`logger`, `Rails.logger`, `@logger`) or on nothing (`puts`, `p`); a domain object's
+# `result.error(...)` is not.
+def log_call?(node)
+  return false unless node.is_a?(Prism::CallNode) && LOG_CALLS.include?(node.name.to_s)
 
-  ancestors.any? { |ancestor| ancestor.is_a?(Prism::CallNode) && LOG_CALLS.include?(ancestor.name.to_s) }
+  node.receiver.nil? || node.receiver.slice.match?(LOGGER_RECEIVER)
+end
+
+# Only an interpolation inside the log call's own arguments is log text: `Solution.where("... #{x}").p(1)` builds a
+# query in the receiver.
+def inside_log_text?(ancestors)
+  ancestors.each_with_index.any? do |ancestor, index|
+    log_call?(ancestor) && !ancestor.arguments.nil? && ancestors[index + 1].equal?(ancestor.arguments) &&
+      ancestors[(index + 1)..].any? { |inner| INTERPOLATIONS.any? { |kind| inner.is_a?(kind) } }
+  end
 end
 
 def statement_line(source, node, ancestors)

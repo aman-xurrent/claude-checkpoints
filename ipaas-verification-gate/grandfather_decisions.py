@@ -1,14 +1,15 @@
-"""Keep the decisions recorded before the owner-words store went live. install.sh runs it; it is idempotent.
+"""Keep the decisions recorded before the owner-words store went live. install.sh runs it on every install.
 
-Lists every decision recorded before OWNER_WORDS_EPOCH, read the way excused_by and waiver_for read them, so
-they keep holding once the store goes live. Then checks each one holds, and makes the files that quote the
-owner readable by the owner only.
+The first run on a machine takes the list: it writes the moment the store went live on this machine, and the
+digest of every decision recorded before it, read the way excused_by and waiver_for read them, so they keep
+holding. Later runs keep that list as it was taken, because a record dated before the moment and written after
+it would otherwise excuse itself by its own date, and they name any such record. Every run makes the files that
+quote the owner readable by the owner only.
 """
 
 import importlib.util
 import json
 import os
-import subprocess
 from pathlib import Path
 
 GATE = Path(__file__).resolve().parent / "gate.py"
@@ -16,22 +17,32 @@ spec = importlib.util.spec_from_file_location("gate", GATE)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
-listing = subprocess.run(["git", "-C", str(gate.MAIN_REPOSITORY), "worktree", "list", "--porcelain"],
-                         capture_output=True, text=True, check=True).stdout
-roots = [Path(line.split(" ", 1)[1]) for line in listing.splitlines() if line.startswith("worktree ")]
+roots = gate.repository_worktrees(gate.MAIN_REPOSITORY)
 records = [record for root in roots if root.exists() for record in gate.read_deviations(root)]
 records += [gate.read_json(path) for path in sorted(gate.WAIVERS_DIRECTORY.glob("*.json"))]
-earlier = [record for record in records if record and (record.get("recorded_at") or "") < gate.OWNER_WORDS_EPOCH]
-digests = sorted({gate.decision_digest(record) for record in earlier})
-gate.write_json(gate.GRANDFATHERED_DECISIONS_FILE, digests, mode=gate.PRIVATE_FILE_MODE)
-gate.PROCESS_MEMO.clear()
-holding = [record.get("id") or record.get("digest") for record in earlier if gate.owner_decision_holds(record)]
-print(f"epoch {gate.OWNER_WORDS_EPOCH}: {len(earlier)} earlier decision(s) listed, {len(holding)} hold: {holding}")
-assert len(holding) == len(earlier), "an earlier decision stopped holding"
+records = [record for record in records if isinstance(record, dict)]
 
-private = [gate.SKIPS_LOG, *gate.TRACE_DIRECTORY.glob("*.jsonl"), *gate.OWNER_WORDS_DIRECTORY.glob("*.jsonl")]
+if gate.GRANDFATHERED_DECISIONS_FILE.exists():
+    epoch = gate.owner_words_epoch()
+    listed = set(gate.read_json(gate.GRANDFATHERED_DECISIONS_FILE, default=[]) or [])
+    unlisted = [record.get("id") or record.get("digest") for record in records
+                if (record.get("recorded_at") or "") < epoch and gate.decision_digest(record) not in listed]
+    print(f"epoch {epoch}: the list taken then holds {len(listed)} decision(s) and stays as it was")
+    if unlisted:
+        print(f"WARNING: {len(unlisted)} decision(s) dated before {epoch} were not on the list when it was taken, so "
+              f"they must quote the owner: {unlisted}")
+else:
+    epoch = gate.now_iso()
+    gate.OWNER_WORDS_EPOCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    gate.OWNER_WORDS_EPOCH_FILE.write_text(epoch + "\n")
+    os.chmod(gate.OWNER_WORDS_EPOCH_FILE, gate.PRIVATE_FILE_MODE)
+    digests = sorted({gate.decision_digest(record) for record in records if (record.get("recorded_at") or "") < epoch})
+    gate.write_json(gate.GRANDFATHERED_DECISIONS_FILE, digests, mode=gate.PRIVATE_FILE_MODE)
+    print(f"epoch {epoch}: {len(digests)} earlier decision(s) listed")
+    print(json.dumps({"grandfathered": str(gate.GRANDFATHERED_DECISIONS_FILE), "digests": digests}, indent=2))
+
+private = [path for path in (gate.SKIPS_LOG, *gate.TRACE_DIRECTORY.glob("*.jsonl"),
+                              *gate.OWNER_WORDS_DIRECTORY.glob("*.jsonl")) if path.exists()]
 for path in private:
-    if path.exists():
-        os.chmod(path, gate.PRIVATE_FILE_MODE)
+    os.chmod(path, gate.PRIVATE_FILE_MODE)
 print(f"{len(private)} file(s) made readable by the owner only")
-print(json.dumps({"grandfathered": str(gate.GRANDFATHERED_DECISIONS_FILE), "digests": digests}, indent=2))

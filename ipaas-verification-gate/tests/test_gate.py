@@ -3,7 +3,9 @@
 Run: python3 -m unittest discover -s tests
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -30,8 +32,13 @@ def sh(cwd, *command, check=True, env=None):
 
 
 def git_path(repository, name):
-    location = Path(sh(repository, "git", "rev-parse", "--git-path", name).stdout.strip())
-    return location if location.is_absolute() else repository / location
+    return repository / sh(repository, "git", "rev-parse", "--git-path", name).stdout.strip()
+
+
+def init_repository(path):
+    sh(path, "git", "init", "-q", "-b", "main")
+    sh(path, "git", "config", "user.email", "test@example.com")
+    sh(path, "git", "config", "user.name", "test")
 
 
 def find_units_with(command, path, added_lines):
@@ -49,9 +56,7 @@ class ScratchRepository(unittest.TestCase):
         self.addCleanup(gate.PROCESS_MEMO.clear)
         self.root = self.directory / "repo"
         self.root.mkdir()
-        sh(self.root, "git", "init", "-q", "-b", "main")
-        sh(self.root, "git", "config", "user.email", "test@example.com")
-        sh(self.root, "git", "config", "user.name", "test")
+        init_repository(self.root)
         self.write("app/a.rb", "one\ntwo\nthree\n")
         self.commit("base")
         self.publish_main()
@@ -131,17 +136,14 @@ class CommitHookTest(ScratchRepository):
     def test_the_replay_markers(self):
         linked = self.directory / "linked"
         sh(self.root, "git", "worktree", "add", "-q", "-b", "other", str(linked))
-
-        def marker(name):
-            return git_path(linked, name)
         self.assertIsNone(gate.replay_marker(linked))
-        marker("rebase-merge").mkdir(parents=True)
+        git_path(linked, "rebase-merge").mkdir(parents=True)
         self.assertIsNone(gate.replay_marker(linked), "a break stop is the user's own commit")
-        marker("REBASE_HEAD").write_text("x\n")
+        git_path(linked, "REBASE_HEAD").write_text("x\n")
         self.assertEqual(gate.replay_marker(linked), "REBASE_HEAD")
-        marker("rebase-merge/amend").write_text("x\n")
+        git_path(linked, "rebase-merge/amend").write_text("x\n")
         self.assertIsNone(gate.replay_marker(linked), "an edit stop is the user's own commit")
-        marker("CHERRY_PICK_HEAD").write_text("x\n")
+        git_path(linked, "CHERRY_PICK_HEAD").write_text("x\n")
         self.assertEqual(gate.replay_marker(linked), "CHERRY_PICK_HEAD")
         self.assertIsNone(gate.replay_marker(self.root))
 
@@ -161,17 +163,38 @@ class CommitHookTest(ScratchRepository):
         self.assertNotIn("Phase:", self.body())
         self.assertNotIn("[skip ci]", self.body())
 
-    def test_an_amend_that_adds_code_with_no_phase_active_claims_none(self):
+    def run_hook(self, message, *source):
+        sh(self.root, sys.executable, str(GATE_FILE), "commit-msg", str(message), *source)
+        return message.read_text()
+
+    def test_an_amend_with_no_phase_active_keeps_only_the_phase_its_commit_had(self):
         self.write("app/a.rb", "one\nten\nthree\n")
         self.commit(f"work\n\n{CLAUDE_TRAILER}")
         message = self.directory / "amended"
-        message.write_text(f"work\n\nPhase: 3\n{CLAUDE_TRAILER}\n")
-        sh(self.root, sys.executable, str(GATE_FILE), "commit-msg", str(message), "commit", "HEAD")
-        self.assertIn("Phase: 3", message.read_text(), "a message-only amend keeps its phase")
-        self.write("app/a.rb", "one\neleven\nthree\n")
+        message.write_text(f"work\n\n[skip ci]\n\nPhase: 3\n{CLAUDE_TRAILER}\n")
+        typed = self.run_hook(message, "commit", "HEAD")
+        self.assertNotIn("Phase:", typed, "a phase typed into a message-only amend of code goes")
+        self.assertNotIn("[skip ci]", typed)
+        self.set_phase(3)
+        self.write("app/a.rb", "one\ntwelve\nthree\n")
+        self.commit(f"phase work\n\n{CLAUDE_TRAILER}")
+        (self.root / ".claude/proof/phase").unlink()
+        message.write_text(f"phase work, reworded\n\n[skip ci]\n\nPhase: 3\n{CLAUDE_TRAILER}\n")
+        self.assertIn("Phase: 3", self.run_hook(message, "commit", "HEAD"), "the phase HEAD carried stays")
+        self.write("app/a.rb", "one\nthirteen\nthree\n")
         sh(self.root, "git", "add", "-A")
-        sh(self.root, sys.executable, str(GATE_FILE), "commit-msg", str(message), "commit", "HEAD")
-        self.assertNotIn("Phase:", message.read_text())
+        self.assertNotIn("Phase:", self.run_hook(message, "commit", "HEAD"), "an amend that adds code claims none")
+
+    def test_only_a_real_merge_keeps_the_message_git_left(self):
+        self.set_phase(7)
+        self.write("app/a.rb", "one\nfourteen\nthree\n")
+        sh(self.root, "git", "add", "-A")
+        message = self.directory / "picked"
+        message.write_text(f"picked\n\n[skip ci]\n\nPhase: 2\n{CLAUDE_TRAILER}\n")
+        self.assertIn("Phase: 7", self.run_hook(message, "merge"), "a `cherry-pick -n` leaves MERGE_MSG only")
+        git_path(self.root, "MERGE_HEAD").write_text(self.head() + "\n")
+        message.write_text("Merge branch 'other'\n\nPhase: 2\n")
+        self.assertIn("Phase: 2", self.run_hook(message, "merge"), "a real merge is the merge's own")
 
     def test_a_docs_commit_with_no_phase_keeps_its_skip_keyword(self):
         self.write("docs/notes.md", "a note\n")
@@ -209,9 +232,15 @@ class CommitHookTest(ScratchRepository):
         message.write_text(f"work\n\n{CLAUDE_TRAILER}\n")
         self.addCleanup(os.chdir, os.getcwd())
         os.chdir(self.root)
+        stale = {"verdict": gate.VERDICT_UNUSED, "base": "an-old-base", "change_id": "an-old-change"}
+        gate.write_json(gate.references_directory(self.root) / "latest.json", stale)
         with mock.patch.object(gate, "references_report_for", side_effect=RuntimeError("ast-grep is missing")):
             gate.commit_msg([str(message), "message"])
         self.assertIn(CLAUDE_TRAILER, message.read_text())
+        self.assertIn(f"References-Verdict: {gate.VERDICT_NOT_COMPUTED}", message.read_text(), "never the old verdict")
+        sh(self.root, "git", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-F", str(message))
+        violations = gate.commit_violations(self.root, self.head())
+        self.assertTrue(any("could not run" in violation for violation in violations), violations)
 
     def test_a_squash_keeps_the_highest_phase(self):
         message = self.directory / "squash"
@@ -221,14 +250,12 @@ class CommitHookTest(ScratchRepository):
         self.assertNotIn("[skip ci]", message.read_text())
 
     def test_the_replay_rules(self):
-        def marker(name):
-            return git_path(self.root, name)
-        marker("REBASE_HEAD").write_text("x\n")
-        marker("CHERRY_PICK_HEAD").write_text("x\n")
+        git_path(self.root, "REBASE_HEAD").write_text("x\n")
+        git_path(self.root, "CHERRY_PICK_HEAD").write_text("x\n")
         self.assertIsNone(gate.replay_marker(self.root), "outside a rebase both are new commits")
-        marker("rebase-merge").mkdir()
-        marker("CHERRY_PICK_HEAD").unlink()
-        marker("rebase-merge/amend").write_text("x\n")
+        git_path(self.root, "rebase-merge").mkdir()
+        git_path(self.root, "CHERRY_PICK_HEAD").unlink()
+        git_path(self.root, "rebase-merge/amend").write_text("x\n")
         self.assertIsNone(gate.replay_marker(self.root))
         with mock.patch.dict(os.environ, {"GIT_REFLOG_ACTION": "rebase (reword)"}):
             self.assertEqual(gate.replay_marker(self.root), "GIT_REFLOG_ACTION=rebase (reword)")
@@ -236,6 +263,7 @@ class CommitHookTest(ScratchRepository):
     def test_the_owners_squash_of_claude_commits_is_the_owners(self):
         squashed = f"Squashed commit of the following:\n\n    {CLAUDE_TRAILER}\n"
         self.assertIsNone(gate.CLAUDE_TRAILER_PATTERN.search(squashed))
+        self.assertIsNotNone(gate.CLAUDE_TRAILER_PATTERN.search(f"work\n\n {CLAUDE_TRAILER}\n"), "a small indent")
 
 
 class ChangeIdentityTest(ScratchRepository):
@@ -417,6 +445,18 @@ class TipFreshnessTest(ScratchRepository):
         owner = self.commit("the owner's commit")
         later = self.claude_commit("spec/a_spec.rb", "it 'works'\n", "run1")
         self.assertEqual(gate.tip_freshness_violations(self.root, [later, owner, proven]), [])
+
+    def test_a_file_is_never_read_at_a_claude_commit_older_than_the_proof(self):
+        sh(self.root, "git", "checkout", "-q", "-b", "feature")
+        first = self.claude_commit("app/a.rb", "one\nTWO\nthree\n", "run0")
+        self.write("app/a.rb", "one\nTWO and the owner's touch\nthree\n")
+        owner = self.commit("the owner's commit")
+        proven = self.claude_commit("app/b.rb", "b\n", "run2")
+        delta = gate.commit_delta(self.root, proven, "origin/main")
+        gate.write_json(gate.runs_directory(self.root) / "run2" / gate.META_FILE_NAME,
+                        {"change_id": gate.patch_identity(delta), "path_ids": gate.path_identities(delta),
+                         "base_ref": "origin/main"})
+        self.assertEqual(gate.tip_freshness_violations(self.root, [proven, owner, first]), [])
 
     def test_a_missing_base_is_refused_not_skipped(self):
         sh(self.root, "git", "checkout", "-q", "-b", "feature")
@@ -645,6 +685,21 @@ class OwnerWordsTest(ScratchRepository):
         self.assertTrue(gate.owner_decision_holds({"evidence": "the overlay class is styling only, let it through",
                                                    "recorded_at": "2999-01-01T00:00:00Z", "worktree": str(self.root)}))
 
+    def test_a_machine_that_installed_later_keeps_its_own_epoch(self):
+        epoch_file = self.directory / "owner-words-epoch"
+        epoch_file.write_text("2026-11-01T00:00:00Z\n")
+        listed = {"evidence": "x", "recorded_at": "2026-10-25T00:00:00Z"}
+        grandfathered = self.directory / "grandfathered.json"
+        grandfathered.write_text(json.dumps([gate.decision_digest(listed)]))
+        self.enterContext(mock.patch.object(gate, "OWNER_WORDS_EPOCH_FILE", epoch_file))
+        self.enterContext(mock.patch.object(gate, "GRANDFATHERED_DECISIONS_FILE", grandfathered))
+        gate.PROCESS_MEMO.clear()
+        self.assertTrue(gate.owner_decision_holds(listed), "listed when this machine's store went live")
+        epoch_file.unlink()
+        gate.PROCESS_MEMO.clear()
+        self.assertEqual(gate.owner_words_epoch(), gate.OWNER_WORDS_EPOCH)
+        self.assertFalse(gate.owner_decision_holds(listed), "after the default epoch it must quote the owner")
+
     def test_the_store_is_readable_by_the_owner_only(self):
         self.say("keep this private")
         stored = next((self.directory / "words").glob("*.jsonl"))
@@ -670,9 +725,20 @@ class OwnerWordsTest(ScratchRepository):
         self.assertFalse(self.said("waive this unit."))
         self.assertTrue(self.said("Waive the overlay unit, it is styling."))
 
+    def test_a_negation_anywhere_before_a_soft_start_says_no(self):
+        self.say("Do not under any circumstances: merge the icon change")
+        self.say("We shouldn't\nkeep the larger padding on the card.")
+        self.say("Nope: waive the button colour unit")
+        self.assertFalse(self.said("merge the icon change"))
+        self.assertFalse(self.said("keep the larger padding on the card"))
+        self.assertFalse(self.said("waive the button colour unit"))
+
     def test_the_minimum_length_is_the_owners_own_text(self):
         self.say("c2 - get in A")
+        self.say("yes")
         self.assertTrue(self.said("c2 - get in A"))
+        for padded in ("yes          .", "``````````yes", "yes!!!!!!!!!", "\u201c   yes   \u201d", "yes . . . . . ."):
+            self.assertFalse(self.said(padded), padded)
 
     def test_a_question_and_a_cut_at_a_decimal_point_are_refused(self):
         self.say("Should we waive this unit? No, add a spec.")
@@ -800,8 +866,76 @@ class GuardTest(unittest.TestCase):
                         "echo x | dd of=$HOME/.local/state/gate/owner-words/x.jsonl",
                         "cd ~/.local/state/gate/owner-words && echo x >> 2026-10-19.jsonl",
                         "python3 -c \"open('.claude/proof/runs/X/findings.json', 'w').write('{}')\"",
+                        "P=python3; $P -c \"open('.claude/proof/runs/X/findings.json', 'w').write('{}')\"",
                         "tmux send-keys -t 1 'yes, waive it' Enter"):
             self.assertTrue(self.denied(command, cwd="/work/wt"), command)
+
+    def test_the_fourth_review_shapes_are_refused(self):
+        findings, surface = ".claude/proof/runs/X/findings.json", "python3 ~/personal/scripts/gate/gate.py surface"
+        for command in (f'echo "<<EOF"\nrm -rf .claude/proof/runs/X', f"cat notes.txt # <<EOF\n{surface}",
+                        f"echo $((1<<2))\nrm -rf .claude/proof/runs/X", f'cat <<< "x"\nrm -rf .claude/proof/runs/X',
+                        f"true&{surface}", f"true |& {surface}", "make test |& tee .claude/proof/live/runner.json",
+                        f"cat <<EOF\n$(echo {{}} > {findings})\nEOF", f"cat <({surface})",
+                        f"echo \"$(python3 -c 'print(1)'; {surface})\"",
+                        f"cd .claude/proof/runs/X && bash -c 'echo {{}} > findings.json'; cd /",
+                        f"cat <<'EOF' | source /dev/stdin\necho {{}} > {findings}\nEOF",
+                        f"ksh -c 'echo {{}} > {findings}'", f"echo | xargs bash -c 'echo {{}} > {findings}'",
+                        f"sudo -u root sh -c 'echo {{}} > {findings}'", "eval " * 1100 + f"rm {findings}",
+                        "cd ~/personal/scripts/gate && python3 -mgate surface", "python3 -Bm gate surface",
+                        "python3 -Ximporttime ~/personal/scripts/gate/gate.py surface",
+                        "cd ~/personal/scripts/gate && python3 -c \"import runpy; runpy.run_path('gate.py')\"",
+                        "export GIT_REFLOG_ACTION=rebase", "echo x > .git/MERGE_MSG"):
+            self.assertTrue(self.denied(command, cwd="/work/wt"), command[:80])
+
+    def test_every_way_of_writing_a_file_is_a_write(self):
+        findings = ".claude/proof/runs/X/findings.json"
+        for command in (f"find .claude/proof/runs -name '*.json' -exec rm {{}} +", f"xargs rm {findings}",
+                        f"nice rm {findings}", f"{{ rm {findings}; }}", f"if true; then rm {findings}; fi",
+                        f"! rm {findings}", f"gsed -i s/fail/pass/ {findings}", f"sed -Ei s/a/b/ {findings}",
+                        f"sed --in-place=.bak s/a/b/ {findings}", f"perl -pi -e s/a/b/ {findings}", f"unlink {findings}",
+                        "find .claude/proof/runs -delete", "git clean -fdx .claude/proof", f"curl -o {findings} http://x",
+                        "tar -xf /tmp/f.tar -C .claude/proof/runs", f"git checkout stash@{{0}} -- {findings}",
+                        f"echo {{}} >& {findings}", f"echo {{}} >| {findings}", f"echo {{}} 1<> {findings}",
+                        f"echo {{}}>{findings}",
+                        f"python3 -c \"import json,sys; json.dump({{}}, open('{findings}', 'w')); sys.stdout.flush()\"",
+                        f"ruby -e 'File.open(\"{findings}\", \"r+\") {{ |f| f.puts 1 }}'",
+                        f"ruby -e 'File.open(\"{findings}\", File::WRONLY) {{ |f| f.puts 1 }}'",
+                        f"node -e \"require('fs').unlinkSync('{findings}')\"",
+                        f"python3 -c \"import os; os.system('echo {{}} > {findings}')\""):
+            self.assertTrue(self.denied(command, cwd="/work/wt"), command)
+
+    def test_reads_of_the_same_state_stay_allowed(self):
+        for command in ("grep -n GIT_REFLOG_ACTION ~/personal/scripts/gate/gate.py", "echo $((1<<2))",
+                        "ruby -e 'File.open(\".claude/proof/runs/X/findings.json\", \"r\") { |f| puts f.read }'",
+                        "find .claude/proof/runs -name '*.json' -exec cat {} +", "make test 2>&1 | tee /tmp/log",
+                        ".claude/bin/pr-comment --pr 1 --title t --body-file - <<'EOF'\nthe `gate.py surface` hook\nEOF",
+                        "git commit -F - <<'EOF'\n`a` and $(b)\nEOF", "if true; then echo ok; fi",
+                        "f=$(ls $D/runbooks/* | head -1); head -60 $f",
+                        "mkdir -p .claude/proof && printf 1 > .claude/proof/phase"):
+            self.assertFalse(self.denied(command, cwd="/work/wt"), command)
+
+    def test_a_guard_that_crashes_refuses(self):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        with mock.patch.object(gate, "guard_bash", side_effect=RecursionError), \
+                mock.patch.object(gate, "read_json_stdin", lambda: json.loads(payload)), \
+                contextlib.redirect_stdout(io.StringIO()) as printed:
+            gate.guard()
+        self.assertIn('"permissionDecision": "deny"', printed.getvalue())
+
+
+class SetupTest(unittest.TestCase):
+    def test_setup_builds_the_databases_under_the_gate_lock(self):
+        held, calls = [], []
+
+        @contextlib.contextmanager
+        def lock(log=None):
+            held.append(True)
+            yield
+            held.pop()
+        with mock.patch.object(gate, "gate_lock", lock), \
+                mock.patch.object(gate, "build_gate_worktree", lambda: calls.append(bool(held))):
+            gate.setup()
+        self.assertEqual(calls, [True])
 
 
 class ReviewSlugTest(unittest.TestCase):
@@ -827,6 +961,13 @@ class AddedExamplesTest(unittest.TestCase):
                  "+++ b/spec/new_spec.rb\n@@ -0,0 +1,3 @@\n+  it 'keeps the name'\n+  it 'keeps the icon'\n"
                  "+  it 'drops a blank icon'\n")
         self.assertEqual(gate.added_examples(patch), {"spec/new_spec.rb": {"drops a blank icon"}})
+
+    def test_a_description_removed_from_a_kept_file_hides_nothing_elsewhere(self):
+        patch = ("diff --git a/spec/user_spec.rb b/spec/user_spec.rb\n--- a/spec/user_spec.rb\n+++ b/spec/user_spec.rb\n"
+                 "@@ -1,2 +1,1 @@\n-  it 'returns nil'\n"
+                 "diff --git a/spec/sync_spec.rb b/spec/sync_spec.rb\n--- a/spec/sync_spec.rb\n+++ b/spec/sync_spec.rb\n"
+                 "@@ -1,0 +1,1 @@\n+  it 'returns nil'\n")
+        self.assertEqual(gate.added_examples(patch), {"spec/sync_spec.rb": {"returns nil"}})
 
 
 class HunkLinesTest(unittest.TestCase):
@@ -895,6 +1036,16 @@ class UnitFinderTest(unittest.TestCase):
             self.assertEqual(fallbacks, [("first", 9), ("second", 28)])
 
     @unittest.skipUnless(HAS_TYPESCRIPT, "node or the typescript package is missing")
+    def test_a_constructor_a_getter_and_a_setter_are_scopes_of_their_own(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "box.ts"
+            path.write_text("class Box {\n  constructor() { this.v = a || b; }\n  get value() { return a || b; }\n"
+                            "  set value(v) { this.v = a || b; }\n}\n")
+            found = self.find(["node", str(gate.SCRIPT_UNIT_FINDER), str(gate.typescript_package())], path)
+            scopes = [unit["scope"] for unit in found["units"] if unit["kind"] == "fallback"]
+            self.assertEqual(scopes, ["Box#constructor", "Box#get value", "Box#set value"])
+
+    @unittest.skipUnless(HAS_TYPESCRIPT, "node or the typescript package is missing")
     def test_script_offsets_are_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "wide.ts"
@@ -942,9 +1093,44 @@ class UnitBookkeepingTest(unittest.TestCase):
         self.assertEqual(gate.unit_stage_status(unmeasured + [{"status": gate.UNIT_KILLED}], []), gate.STATUS_PASS)
         self.assertEqual(gate.unit_stage_status([{"status": gate.UNIT_WAIVED}], []), gate.STATUS_PASS)
 
+    def test_the_report_names_the_file_that_lists_the_lines_not_judged(self):
+        units = {"status": gate.STATUS_PASS, "units": [{"status": gate.UNIT_KILLED}], "counts": {}, "seconds": 1,
+                 "spec_files": 1, "not_judged": [{"path": "platform/app/views/x.erb"}]}
+        self.assertIn("findings.json under units.not_judged", gate.unit_report_lines(units)[-1])
+        directory = tempfile.mkdtemp(prefix="gate-measure-")
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        replacements = {"require_repository": lambda command: Path(directory), "diff_base": lambda root: "abc",
+                        "snapshot_patch": lambda root, base: "", "gate_lock": lambda log: contextlib.nullcontext(),
+                        "unit_stage": lambda *arguments, **options: units}
+        for name, value in replacements.items():
+            self.enterContext(mock.patch.object(gate, name, value))
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            gate.units_command(["--measure", "--out", directory])
+        self.assertIn("listed in units.json under not_judged", printed.getvalue())
 
-def outcome(passed=(), failed=(), errors_outside=0, reported=True):
-    return gate.run_outcome(reported, passed, failed, errors_outside)
+    def test_the_measure_budget_defaults_and_zero_means_no_limit(self):
+        directory = tempfile.mkdtemp(prefix="gate-measure-")
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        budgets = []
+        replacements = {"require_repository": lambda command: Path(directory), "diff_base": lambda root: "abc",
+                        "snapshot_patch": lambda root, base: "", "gate_lock": lambda log: contextlib.nullcontext(),
+                        "unit_stage": lambda *arguments, budget=None, **options: budgets.append(budget) or {}}
+        for name, value in replacements.items():
+            self.enterContext(mock.patch.object(gate, name, value))
+        with contextlib.redirect_stdout(io.StringIO()):
+            gate.units_command(["--measure", "--out", directory])
+            gate.units_command(["--measure", "--out", directory, "--budget", "0"])
+            for bad in ("abc", "-5"):
+                with self.assertRaises(SystemExit):
+                    gate.units_command(["--measure", "--out", directory, "--budget", bad])
+        self.assertEqual(budgets, [gate.UNIT_STAGE_BUDGET_SECONDS, None])
+
+    def test_a_spec_file_that_failed_to_load_leaves_its_units_unmeasured(self):
+        baseline = {"red": {"platform/spec/a_spec.rb": {"coverage": {"statements": {}, "functions": {}}}},
+                    "unrun": [], "unloaded": ["platform/spec/a_spec.rb"]}
+        unit = {"path": "p.rb", "kind": "guard", "start_line": 1, "end_line": 1, "anchor_line": 1, "original": "x",
+                "replacement": "", "digest": "d"}
+        self.assertEqual(gate.unjudged_record(unit, baseline)["status"], gate.UNIT_UNMEASURED)
 
 
 class JudgeUnitTest(unittest.TestCase):
@@ -976,27 +1162,28 @@ class JudgeUnitTest(unittest.TestCase):
         return result, calls
 
     def test_a_green_example_turning_red_kills_the_unit(self):
-        self.assertEqual(self.judge(outcome(failed={"a[1:1]"}))[0]["status"], gate.UNIT_KILLED)
+        self.assertEqual(self.judge(gate.run_outcome(True, failed={"a[1:1]"}))[0]["status"], gate.UNIT_KILLED)
 
     def test_a_load_error_is_not_a_kill(self):
-        result = self.judge(outcome(errors_outside=1))[0]
+        result = self.judge(gate.run_outcome(True, errors_outside=1))[0]
         self.assertEqual((result["status"], result["runner_error"]), (gate.UNIT_UNMEASURED, False))
 
     def test_a_run_that_wrote_no_report_is_a_runner_error_not_a_survivor(self):
-        result = self.judge(outcome(reported=False))[0]
+        result = self.judge(gate.run_outcome(False))[0]
         self.assertEqual((result["status"], result["runner_error"]), (gate.UNIT_UNMEASURED, True))
 
     def test_an_example_that_was_already_red_kills_nothing(self):
-        self.assertEqual(self.judge(outcome(passed={"a[1:1]"}, failed={"a[9:9]"}))[0]["status"], gate.UNIT_SURVIVED)
+        result = self.judge(gate.run_outcome(True, passed={"a[1:1]"}, failed={"a[9:9]"}))[0]
+        self.assertEqual(result["status"], gate.UNIT_SURVIVED)
 
     def test_everything_green_is_a_survivor(self):
-        self.assertEqual(self.judge(outcome(passed={"a[1:1]"}))[0]["status"], gate.UNIT_SURVIVED)
+        self.assertEqual(self.judge(gate.run_outcome(True, passed={"a[1:1]"}))[0]["status"], gate.UNIT_SURVIVED)
 
     def test_examples_that_stopped_running_are_not_a_survivor(self):
-        self.assertEqual(self.judge(outcome())[0]["status"], gate.UNIT_UNMEASURED)
+        self.assertEqual(self.judge(gate.run_outcome(True))[0]["status"], gate.UNIT_UNMEASURED)
 
     def test_each_project_runs_its_own_specs(self):
-        _result, calls = self.judge(outcome(passed={"a[1:1]", "b[1:1]"}),
+        _result, calls = self.judge(gate.run_outcome(True, passed={"a[1:1]", "b[1:1]"}),
                                     covering=("platform/spec/a_spec.rb", "connector/spec/b_spec.rb"))
         self.assertEqual(sorted((project, files) for project, files, _text in calls),
                          [("connector", ["connector/spec/b_spec.rb"]), ("platform", ["platform/spec/a_spec.rb"])])
@@ -1014,8 +1201,9 @@ class CoveringSpecsTest(unittest.TestCase):
         unit = {"path": "platform/app/javascript/T.tsx", "anchor_line": 150, "start_line": 200, "end_line": 200,
                 "start_column": 20, "end_column": 26}
         statements = {"platform/app/javascript/T.tsx": [(150, 234, 1)]}
-        called = {"platform/app/javascript/T.tsx": [(140, 0, 240, 1, 1), (199, 0, 201, 3, 1)]}
-        never = {"platform/app/javascript/T.tsx": [(140, 0, 240, 1, 1), (199, 0, 201, 3, 0)]}
+        span = gate.FunctionSpan
+        called = {"platform/app/javascript/T.tsx": [span(140, 0, 240, 1, 1), span(199, 0, 201, 3, 1)]}
+        never = {"platform/app/javascript/T.tsx": [span(140, 0, 240, 1, 1), span(199, 0, 201, 3, 0)]}
         entries = {"rendered-and-clicked.test.tsx": {"coverage": {"statements": statements, "functions": called}},
                    "rendered-only.test.tsx": {"coverage": {"statements": statements, "functions": never}}}
         self.assertEqual(gate.covering_specs(unit, entries), ["rendered-and-clicked.test.tsx"])
@@ -1025,8 +1213,46 @@ class CoveringSpecsTest(unittest.TestCase):
         unit = {"path": "platform/app/javascript/T.tsx", "anchor_line": 7, "start_line": 7, "end_line": 7,
                 "start_column": 29, "end_column": 35}
         coverage = {"statements": {"platform/app/javascript/T.tsx": [(7, 7, 1)]},
-                    "functions": {"platform/app/javascript/T.tsx": [(7, 6, 7, 14, 1), (7, 24, 7, 35, 0)]}}
+                    "functions": {"platform/app/javascript/T.tsx": [gate.FunctionSpan(7, 6, 7, 14, 1),
+                                                                    gate.FunctionSpan(7, 24, 7, 35, 0)]}}
         self.assertEqual(gate.covering_specs(unit, {"t.test.tsx": {"coverage": coverage}}), [])
+
+    def test_a_null_end_column_reaches_the_end_of_the_line_and_zero_stays_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entry = {"statementMap": {}, "s": {}, "f": {"0": 0},
+                     "fnMap": {"0": {"loc": {"start": {"line": 3, "column": 4}, "end": {"line": 3, "column": None}}}}}
+            report = Path(directory) / "coverage-final.json"
+            report.write_text(json.dumps({str(gate.GATE_WORKTREE / "platform/app/javascript/T.tsx"): entry}))
+            coverage = gate.script_coverage(directory)
+        unit = {"path": "platform/app/javascript/T.tsx", "anchor_line": 3, "start_line": 3, "end_line": 3,
+                "start_column": 10, "end_column": 16}
+        self.assertFalse(gate.unit_ran(unit, coverage))
+        self.assertEqual(gate.end_column({"column": 0}), 0)
+
+
+class DesignWindowTest(unittest.TestCase):
+    def test_a_match_on_another_design_keeps_the_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(gate, "now_iso", lambda: "2026-10-19T10:00:00Z"):
+                gate.record_mismatch(root, "frame 1:2", True)
+            gate.record_mismatch(root, "frame 3:4", False)
+            self.assertEqual(gate.latest_mismatch_at(root), "2026-10-19T10:00:00Z")
+            gate.record_mismatch(root, "frame 1:2", False)
+            self.assertIsNone(gate.latest_mismatch_at(root))
+
+    def test_words_must_follow_the_newest_open_difference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for moment, key in (("2026-10-19T10:00:00Z", "frame 1:2"), ("2026-10-19T11:00:00Z", "frame 3:4")):
+                with mock.patch.object(gate, "now_iso", lambda moment=moment: moment):
+                    gate.record_mismatch(root, key, True)
+            self.assertEqual(gate.latest_mismatch_at(root), "2026-10-19T11:00:00Z")
+
+    def test_a_frame_saved_at_another_path_is_the_same_design(self):
+        design = {"frame": {"id": "721:23920", "w": 1440, "h": 900}}
+        self.assertEqual(gate.design_key(design, "/tmp/a/design.json"), gate.design_key(design, "/tmp/b/copy.json"))
+        self.assertNotEqual(gate.design_key({}, "/tmp/a/design.json"), gate.design_key({}, "/tmp/b/copy.json"))
 
 
 class ProveTest(unittest.TestCase):
@@ -1124,30 +1350,9 @@ class UnitStageTest(unittest.TestCase):
             with mock.patch.object(gate, "UNIT_CACHE_FILE", cache):
                 self.assertEqual(list(gate.read_unit_cache()), ["k2"])
 
-    def test_a_null_end_column_reaches_the_end_of_the_line(self):
-        with tempfile.TemporaryDirectory() as directory:
-            entry = {"statementMap": {}, "s": {}, "f": {"0": 0},
-                     "fnMap": {"0": {"loc": {"start": {"line": 3, "column": 4}, "end": {"line": 3, "column": None}}}}}
-            report = Path(directory) / "coverage-final.json"
-            report.write_text(json.dumps({str(gate.GATE_WORKTREE / "platform/app/javascript/T.tsx"): entry}))
-            coverage = gate.script_coverage(directory)
-        unit = {"path": "platform/app/javascript/T.tsx", "anchor_line": 3, "start_line": 3, "end_line": 3,
-                "start_column": 10, "end_column": 16}
-        self.assertFalse(gate.unit_ran(unit, coverage))
-
     def test_a_spec_that_fails_to_load_is_red_not_a_runner_error(self):
         baseline = self.run_with(gate.run_outcome(True, errors_outside=1, coverage=None))
         self.assertEqual((baseline["runner_errors"], list(baseline["red"])), ([], ["platform/spec/a_spec.rb"]))
-
-    def test_a_match_on_another_design_keeps_the_window(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with mock.patch.object(gate, "now_iso", lambda: "2026-10-19T10:00:00Z"):
-                gate.record_mismatch(root, root / "list.json", True)
-            gate.record_mismatch(root, root / "detail.json", False)
-            self.assertEqual(gate.first_mismatch_at(root), "2026-10-19T10:00:00Z")
-            gate.record_mismatch(root, root / "list.json", False)
-            self.assertIsNone(gate.first_mismatch_at(root))
 
     @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
     def test_code_inside_a_log_message_is_not_a_unit_and_a_built_query_is(self):
@@ -1159,6 +1364,14 @@ class UnitStageTest(unittest.TestCase):
             self.assertEqual(sorted((unit["kind"], unit["original"]) for unit in found["units"]),
                              [("fallback", "id || current_id"), ("statement", "id || current_id"),
                               ("statement", 'logger.warn("unavailable: #{e.class}")')])
+
+    @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
+    def test_a_domain_objects_error_call_is_not_a_log_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "result.rb"
+            path.write_text("def fail_it(result)\n  result.error(\"Missing account #{x || y}\")\nend\n")
+            found = find_units_with(["ruby", str(gate.RUBY_UNIT_FINDER)], path, [2])
+            self.assertIn(("fallback", "x || y"), [(unit["kind"], unit["original"]) for unit in found["units"]])
 
     @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
     def test_a_heredoc_statement_is_not_a_unit_and_units_carry_their_scope(self):
@@ -1182,9 +1395,7 @@ class ProveUnitsEndToEndTest(unittest.TestCase):
         self.worktree = self.directory / "gate"
         (self.worktree / "platform/app").mkdir(parents=True)
         (self.worktree / "platform/spec").mkdir(parents=True)
-        sh(self.worktree, "git", "init", "-q", "-b", "main")
-        sh(self.worktree, "git", "config", "user.email", "test@example.com")
-        sh(self.worktree, "git", "config", "user.name", "test")
+        init_repository(self.worktree)
         (self.worktree / "platform/app/greeter.rb").write_text(
             'class Greeter\n  def greet(name)\n    "hello"\n  end\nend\n')
         (self.worktree / "platform/spec/greeter_spec.rb").write_text("describe Greeter do\nend\n")

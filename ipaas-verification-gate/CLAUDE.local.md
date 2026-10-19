@@ -52,21 +52,24 @@ are not units: their users carry the proof, and nothing can test a log line's wo
   spec files are not green when run together, examples that pass with it did not run without it, a run
   timed out, or the time budget ran out first.
 
-A runner that writes no report or no coverage makes the stage an error, never a pass, and a stage that
+A runner that writes no report, or a spec file that loaded and wrote no coverage, makes the stage an error,
+never a pass. A spec file that fails to load is red, and the units it may run are `unmeasured`. A stage that
 killed no unit proved nothing, so its status is `unmeasured`. Changed lines that produced no unit (a
 constant, an assignment, a link of a method chain) and files no finder reads (`.erb`, a config file outside
 `platform/app/javascript/`) are listed as not judged, under `not_judged` in the report.
 
-`units --measure` prints the report and the path of its `units.json`. A survivor is fixed with an example
-that fails without the unit, or by deleting the unit. **It reports only: survivors refuse no push.**
+`python3 ~/personal/scripts/gate/gate.py units --measure` prints the report and the path of its `units.json`.
+A survivor is fixed with an example that fails without the unit, or by deleting the unit. **It reports only:
+survivors refuse no push.**
 
-`gate.py waive --unit <digest> --evidence "<their words>"` lets one survivor a proof run reported through,
-on the user's whole sentences typed after that report. While the stage runs only on request, no proof run
-reports a unit, so there is nothing to waive.
+`python3 ~/personal/scripts/gate/gate.py waive --unit <digest> --evidence "<their words>"` lets one survivor a
+proof run reported through, on the user's whole sentences typed after that report. While the stage runs only on
+request, no proof run reports a unit, so there is nothing to waive.
 
-`pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer, and
-it judges the branch again at the newest Claude commit: a rebase or an amend that changed a file under a
-proof makes it stale. A clean rebase keeps a proof fresh, because freshness compares the changed lines,
+`pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer, and it
+judges the newest proof again: each file it proved is read at the newest Claude commit, from the proven one up,
+that touched it, so a rebase or an amend that changed a file under a proof makes it stale, and the owner's
+own commits are not the proof's business. A clean rebase keeps a proof fresh, because freshness compares the changed lines,
 not the raw diff. Every changed file except documentation counts, YAML and stylesheets included. A file
 that sat untracked in the worktree while the proof ran and is never committed does not count, unless it
 is code, a spec or a fixture.
@@ -127,12 +130,14 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
 
 - The active phase is the number in `.claude/proof/phase`. `prepare-commit-msg` stamps it as `Phase: N`
   on every new commit, whatever its message says. An amend takes the higher of its own phase and the
-  active one. With no phase active, a Claude commit or amend that adds code carries no phase: the hook
-  removes the trailer and the `[skip ci]` line it wrote. Another skip spelling stays, and pre-push refuses
-  it. A commit a rebase replays (a pick, a reword, a continue after a conflict) keeps its trailers, and a
-  squash keeps its highest phase; the hook says so on standard error. A cherry-pick outside a rebase is a
-  new commit.
-- `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`.
+  active one. With no phase active, a Claude commit that adds code carries no phase: the hook removes the
+  trailer and every line that is exactly `[skip ci]`. An amend that adds no code keeps only the phase its
+  commit already carried. Another skip spelling stays, and pre-push refuses it. A commit a rebase replays (a
+  pick, a reword, a continue after a conflict) keeps its trailers, and a squash keeps its highest phase; the
+  hook says so on standard error. A cherry-pick outside a rebase, `-n` or conflicted, is a new commit. Only a
+  real merge, which leaves `MERGE_HEAD`, keeps the message git wrote.
+- `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`, and a
+  `References-Verdict: not-computed`, which a commit gets when the reference scan could not run.
   It refuses a skip keyword on any other code commit, the ones outside the loop included.
   Phases 6 and 7 need a passing, fresh proof like any other Claude commit.
 - `prepare-commit-msg` writes `[skip ci]` into the body of a phase 1 to 5 commit: those phases add no
@@ -425,7 +430,8 @@ When the build does not follow the design or the spec on purpose, record it:
 Only the user decides that a difference is deliberate. `--decided-by user` needs `--evidence` that the
 gate finds as whole sentences of what the user typed in this repository, after figma-compare reported
 the difference it answers; it refuses anything else. A `--region` needs that report first, whatever the
-record's kind, and a compare that matches ends it. A
+record's kind. A compare of the same design frame that matches ends that frame's window, and the words must
+come after the newest window still open, because a deviation does not say which design it answers. A
 record you make without it is a note: it explains the difference and it lets no mismatch pass.
 `--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
 design difference. Never record one to make a comparison pass.

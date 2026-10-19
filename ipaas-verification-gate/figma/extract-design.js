@@ -25,4 +25,4 @@ for (const node of frame.findAllWithCriteria({ types: ["FRAME", "INSTANCE", "COM
   if (!box || !node.visible) continue;
   boxes.push({ id: node.id, name: node.name, ...box });
 }
-return { frame: { w: origin.width, h: origin.height }, texts, boxes };
+return { frame: { id: frame.id, w: origin.width, h: origin.height }, texts, boxes };

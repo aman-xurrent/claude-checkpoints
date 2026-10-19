@@ -98,12 +98,21 @@ function candidatesAt(node, source) {
 }
 
 // The function or class a unit sits in, `Tile#onClick`, so two identical units in two functions are two units.
+// A constructor has no name node, and a getter and a setter share one, so each says what it is.
+function scopeName(holder, source) {
+  if (holder.kind === KINDS.Constructor) return "constructor";
+  const declared = holder.parent && holder.parent.kind === KINDS.VariableDeclaration && holder.parent.name;
+  const named = holder.name || declared;
+  if (!named) return null;
+  const prefix = { [KINDS.GetAccessor]: "get ", [KINDS.SetAccessor]: "set " }[holder.kind] || "";
+  return prefix + named.getText(source);
+}
+
 function scopeOf(node, source) {
   const names = [];
   for (let holder = node.parent; holder; holder = holder.parent) {
-    const declared = holder.parent && holder.parent.kind === KINDS.VariableDeclaration && holder.parent.name;
-    const named = holder.name || declared;
-    if (SCOPES.has(holder.kind) && named) names.unshift(named.getText(source));
+    const name = SCOPES.has(holder.kind) && scopeName(holder, source);
+    if (name) names.unshift(name);
   }
   return names.join("#");
 }

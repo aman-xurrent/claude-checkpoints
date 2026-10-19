@@ -129,9 +129,6 @@ PY
 say "9. gate.py setup (worktree, env, databases)"
 python3 "$GATE_DIR/gate.py" setup
 
-say "9b. owner words: keep the decisions recorded before the store went live"
-python3 "$GATE_DIR/grandfather_decisions.py"
-
 say "9a. local phase workflow: hook symlink, links into the main clone and every existing worktree"
 HOOKS_DIR="$(cd "$REPO" && git rev-parse --git-path hooks)"
 case "$(cd "$REPO" && readlink "$HOOKS_DIR/post-checkout" 2>/dev/null)" in
@@ -143,10 +140,13 @@ esac
   python3 "$GATE_DIR/gate.py" link-worktree "$wt" | sed "s|^|  |"
 done
 
-say "9b. checks worktree: one slot for finalize, specs and the live checks (minutes, creates databases)"
+say "9b. owner words: keep the decisions recorded before the store went live"
+python3 "$GATE_DIR/grandfather_decisions.py"
+
+say "9c. checks worktree: one slot for finalize, specs and the live checks (minutes, creates databases)"
 python3 "$GATE_DIR/gate.py" setup-checks
 
-say "9c. phased daemon: config, command, LaunchAgent"
+say "9d. phased daemon: config, command, LaunchAgent"
 PHASED_DIR="$(cd "$GATE_DIR/../phased" 2>/dev/null && pwd || true)"
 if [ -n "$PHASED_DIR" ] && [ -f "$PHASED_DIR/phased.py" ]; then
   GH_HOST="${GH_HOST:-git.4me.com}" python3 "$PHASED_DIR/phased.py" init
