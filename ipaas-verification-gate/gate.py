@@ -301,7 +301,7 @@ OWNER_WORDS_DIRECTORY = SKIPS_LOG.parent / "owner-words"
 # Decisions recorded before the store existed cannot be checked against it, and checking them would
 # freeze every open pull request that carries one. Only later decisions are checked. This is the moment
 # the store went live, not the day it was written: a decision recorded in between found no words.
-OWNER_WORDS_EPOCH = "2026-10-17T00:00:00Z"
+OWNER_WORDS_EPOCH = "2026-10-19T07:32:00Z"
 # The store holds what the owner typed, which can include a pasted secret. A decision older than this
 # has to be given again.
 OWNER_WORDS_KEEP_DAYS = 90
