@@ -30,11 +30,48 @@ An example the patch both removes and adds counts as moved, not added.
 Read what the sweep proves, and what it does not:
 
 - It proves each example your change adds depends on **something** in the diff.
-- It does not prove the file tests the **mechanism it claims to guard**. A spec whose own narrowing
-  logic never fires, and a spec that rebuilds its expected value from the same expression it checks,
-  both stay green here. Removing the specific guard and re-running is still your job, not the gate's.
+- It does not prove each changed line is tested. The unit stage below asks that.
 
-`pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer.
+## Every changed unit is removed, one at a time
+
+After the sweep, the prover removes one changed unit at a time in the gate worktree and runs the specs
+that ran it. A unit is a statement, an entry of a hash, an array or a keyword argument list, a JSX child
+or attribute, a guard reduced to what it guards (`c && <X/>` to `<X/>`), or a fallback reduced to its left
+side (`a || b` to `a`). Imports, types, comments, `private` and declarations are not units: their users
+carry the proof.
+
+- `killed`: an example that passed with the change failed without the unit. The unit is tested.
+- `survived`: every spec that ran the unit stays green without it. Nothing tests it.
+- `unexecuted`: no candidate spec file runs the unit at all.
+- `unmeasured`: the unit could not be judged, and the record says why: the specs did not load without it
+  (the file is needed, not the line), only spec files that are red with the change applied ran it, its
+  spec files are not green when run together, examples that pass with it did not run without it, a run
+  timed out, or the time budget ran out first.
+
+A runner that writes no report or no coverage makes the stage an error, never a pass, and a stage that
+killed no unit proved nothing, so its status is `unmeasured`. Changed lines that produced no unit (a
+constant, an assignment, a link of a method chain) and files no finder reads (`.erb`, a config file outside
+`platform/app/javascript/`) are listed as not judged: in the run's `findings.json` under `units.not_judged`,
+or in `units.json` for `units --measure`.
+
+Read the report with `python3 ~/personal/scripts/gate/gate.py units`. A survivor is fixed with an
+example that fails without the unit, or by deleting the unit. **It reports for now: survivors do not
+refuse the push until the stage has been measured on real branches.**
+
+If you think a survivor needs no spec, quote the unit to the user and stop. Only their words clear it,
+recorded once they give them:
+`python3 ~/personal/scripts/gate/gate.py waive --unit <digest> --evidence "<their words>"`. The words must
+be whole sentences the user typed in this repository after the unit stage reported the unit. Your summary,
+text the gate printed before they typed it, a pasted block and an option label you wrote are refused. One
+record covers one unit in one worktree, and it stops counting when the unit's text changes. A survivor
+found by `units --measure` cannot be waived: declare a proof and waive the unit its run reports.
+
+`pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer, and
+it judges the branch again at the newest Claude commit: a rebase or an amend that changed a file under a
+proof makes it stale. A clean rebase keeps a proof fresh, because freshness compares the changed lines,
+not the raw diff. Every changed file except documentation counts, YAML and stylesheets included. A file
+that sat untracked in the worktree while the proof ran and is never committed does not count, unless it
+is code, a spec or a fixture.
 There is no skip for you. No environment variable, no `--no-verify`, no hook path change, no edit to the
 gate: those commands are denied to your Bash tool. Only the user can let one push through, from their own
 shell, with `! python3 ~/personal/scripts/gate/gate.py skip-once "<reason>"`. When the gate refuses, fix
@@ -43,7 +80,8 @@ the cause or report the refusal verbatim. The gate lives in `~/personal/scripts/
 ## Every gate call is recorded
 
 The gate writes each call and its answer to `~/.local/state/gate/trace/<date>.jsonl`. Read your own with
-`python3 ~/personal/scripts/gate/gate.py trace --session <id> --full`. You cannot edit that directory.
+`python3 ~/personal/scripts/gate/gate.py trace --session <id> --full`. Never write that directory: the
+guard refuses the plain ways, and the others are the same breach.
 When the gate answers something you did not expect, quote the trace line instead of describing it.
 
 ## Reference impact (Phase B)
@@ -83,14 +121,20 @@ you claim a change is complete, use the tools that see the whole change:
 A change is the definition and all of its references. Specs that mock the old name are part
 of the change. String literals and YAML that name it are part of the change.
 
-## Phased development (default for every code change)
+## Phased development (only when the user asks for it)
 
-A code change starts with `/phase` (phase 1, discovery) unless the prompt says `quick`. One branch, one
+The phase loop runs when the user asks for it with `/phase`. Never start it on your own. One branch, one
 draft PR, one commit per phase, a human approval between phases. The phase skills live in
 `.claude/skills/phase-1` to `phase-7`; the shared start and handoff are in `.claude/skills/phase/ceremony.md`.
 
-- The active phase is the number in `.claude/proof/phase`. `prepare-commit-msg` stamps it as `Phase: N`.
+- The active phase is the number in `.claude/proof/phase`. `prepare-commit-msg` stamps it as `Phase: N`
+  on every new commit, whatever its message says. An amend takes the higher of its own phase and the
+  active one. With no phase active, a Claude commit carries no phase and no `[skip ci]`: the hook removes
+  both. A commit a rebase replays (a pick, a reword, a continue after a conflict) keeps its trailers, and
+  a squash keeps its highest phase; the hook says so on standard error. A cherry-pick outside a rebase is
+  a new commit.
 - `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`.
+  It refuses a skip keyword on any other code commit, the ones outside the loop included.
   Phases 6 and 7 need a passing, fresh proof like any other Claude commit.
 - `prepare-commit-msg` writes `[skip ci]` into the body of a phase 1 to 5 commit: those phases add no
   behaviour, so CI has nothing to test. Never write a skip keyword on phase 6 or 7; `pre-push` refuses it.
@@ -179,10 +223,8 @@ matches the current diff.
 | `edge-cases` | `/edge-case-hunter` | the inputs and states nobody wrote a case for |
 | `quality` | `/agent-skills:code-review-and-quality` | correctness, readability, architecture, security, performance |
 
-Command names and skill names differ. The plugin keeps its commands in
-`~/.claude/plugins/cache/addy-agent-skills/agent-skills/1.0.0/.claude/commands/`, so `code-simplify` is
-the command and `code-simplification` is the skill it invokes. Read that directory before you call a
-name wrong.
+`review-record --skill` takes the slug or the skill's own name in any spelling: `/edge-case-hunter`,
+`bmad-review-edge-case-hunter`, `agent-skills:code-simplify` and `code-simplification` all resolve.
 
 Record every item a skill returned, never a summary. Write the items file **outside the repository**:
 a file inside the working tree joins the diff and makes the records stale the moment they are written.
@@ -298,8 +340,10 @@ it:
 ```
 
 `--verdict` is one of `fix-in-this-pr`, `separate-request`, `follow-the-user's-words`. `--evidence`
-is the user's own words, quoted, never your summary of them: the quote is what makes the decision
-checkable later. The record keeps which way it came, `chat` or `marks`.
+is the user's own words, whole sentences copied from what they typed, never your summary of them. The
+gate checks the quote against the user's stored prompts and answers, typed in this repository after the
+reviewer's latest comment on that thread, and refuses one it cannot find. The record keeps which way it
+came, `chat` or `marks`.
 
 If their message does not say which comment it answers, ask which one. Never guess: a decision
 recorded against the wrong comment is worse than no decision, because nothing later shows it went
@@ -376,99 +420,28 @@ When the build does not follow the design or the spec on purpose, record it:
 .claude/bin/deviation --id no-avatar-column --kind design \
   --summary "the avatar column is not built" --reason "the team dropped it from this release" \
   --source "figma 721:23920" --region 1104,98,180,640 \
-  --decided-by user --evidence "<the user's words, or the comment URL>"
+  --decided-by user --evidence "<the user's words, copied from what they typed>"
 ```
 
-Only the user decides that a difference is deliberate, and `--decided-by user` needs `--evidence`.
-Without it the record is a note from you: it explains the difference and it lets no mismatch pass.
+Only the user decides that a difference is deliberate. `--decided-by user` needs `--evidence` that the
+gate finds as whole sentences of what the user typed in this repository, after figma-compare reported
+the difference it answers; it refuses anything else. A `--region` needs that report first, whatever the
+record's kind, and a compare that matches ends it. A
+record you make without it is a note: it explains the difference and it lets no mismatch pass.
 `--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
 design difference. Never record one to make a comparison pass.
 
-## Never trade a plain verb for a grander one
-
-A register habit, not a word choice. The plain thing gets written, then re-rendered to sound
-authoritative, and the grander verb is always vaguer.
-
-| Written | What it hides |
-| --- | --- |
-| "the one clause that **discharges** it" | which clause, and what it does |
-| "**leverages** the existing helper" | it calls it |
-| "**encompasses** both spellings" | it matches both |
-| "**necessitates** a rebase" | you have to rebase |
-
-**The test: if the sentence describes code, use the verb you can point at a line for.** Blocks,
-returns, raises, skips, writes, deletes, reverts, matches, refuses. "The clause blocks the request"
-points at `return head(:bad_request)`. "The clause discharges the grant" points at nothing.
-
-When no line can be pointed at, the grand word is covering a gap. Go and read the code, then write
-what it does.
-
-Never revise a plain word upward on a second pass. The first plain word was right.
-
-There is no list of banned words, and there will not be one. A list catches only the words already
-on it; the next one walks straight past, which is exactly how "discharges" got through a rule that
-had banned "leverage" since the first day. The test is the rule.
-
-## Say the thing, not its label
-
-People do not talk in identifiers. Never write `C3`, `O1`, `item 2`, `finding 3`, `phase 2` or
-`option B` in place of the thing itself.
-
-| Written | Write instead |
-| --- | --- |
-| "item 2 is fixed" | "the pull request description no longer loses its fold" |
-| "C3 decided" | "you marked the block-scope sweep as fix in this pull request" |
-| "O1 is still open" | "whether a real folder id is ever read is still open" |
-| "finding 3 is not caught" | "the spec whose own narrowing regex never fires is not caught" |
-
-The label is an address, not a name. It may sit **beside** the thing, and never **in for** it:
-"**C3**, the spec that lets one block vouch for another, is still green with the guard removed."
-
-Every first mention carries the words. A closing summary counts as a first mention, because it is
-often the only part that gets read. A table column of bare labels is the same defect in another
-shape: put a words column next to it.
-
-This is the diagram rule applied everywhere else. A diagram must not send the reader to an editor,
-and a sentence must not send the reader back up the page. The reader should never hold a lookup
-table in their head to read what you wrote.
-
-**Worked pairs: `~/personal/scripts/gate/examples/naming-things.md`.**
-
-## Diagrams say it in plain English
-
-Every label in a diagram follows the same house style as every other answer: short words, short
-sentences, no jargon left undefined. Do not reach for a fancier word when a common one works. Write
-"use", not "leverage". Write "so", not "thereby". Write "stops working", not "degrades". One word
-means one thing across the whole drawing: if it is "delete" in one box it is "delete" in every box.
-A label that sounds impressive and says little is worse than a plain one, because the reader has to
-decode it before they can decide. Never use an em dash. The full convention lives in
-`~/personal/scripts/gate/diagram-convention.md`.
-
 ## Diagram replies
 
-The user answers a diagram with `R:` marks. When they say they updated one, read the marks instead of
-reading the picture:
+The writing and diagram style rules live in `~/.claude/CLAUDE.md`, which every session loads. For what the
+ipaas tools enforce (the pull request description, review records, comment triage and the gate), this file
+is the authority.
 
-```
-~/personal/scripts/excalidraw-marks <file.excalidraw|file.svg>
-```
-
-`R:IN` keeps that point, `R:OUT` drops it, and `R:<text>` is a reply about it. A mark sits anywhere
-on a line, usually at the end of the point's own line after `decision:`, and it reports the text
-before it on that line as the point it answers. Act on every mark before you redraw, and answer
-every `R:<text>` in chat.
-
-**The answers stay on the drawing.** The Excalidraw canvas is one canvas, so drawing the next
-diagram destroys the one on it and every answer typed on it. Export the canvas to its named file in
-`~/.claude/excalidraw/` before every clear. After the user answers, import the marked source, export
-the svg again, and republish with the same `.claude/bin/pr-diagram --name`: the file lands at the
-same path on the same branch, so the image in the description updates in place with no edit to the
-body. `pr-diagram` refuses an svg that carries no answer when its source has one.
-
-When you redraw a diagram whose points were answered, state each answer inside its point
-(`O3  decision: IN, phase 7 ships without shared-mailbox evidence`). Never put the old `R:` text
-back by position: the wording moves, the coordinates do not, and a mark replaced beside the wrong
-point is worse than no mark at all.
+Read the user's `R:` marks with `~/personal/scripts/excalidraw-marks <file.excalidraw|file.svg>`, never by
+reading the picture. After the user answers, import the marked source, export the svg again, and republish
+with the same `.claude/bin/pr-diagram --name`: the file lands at the same path on the same branch, so the
+image in the description updates in place. `pr-diagram` refuses an svg that carries no answer when its
+source has one.
 
 ## The pull request description is diagrams, not prose
 
@@ -484,51 +457,18 @@ One section per phase, in the order the phases happened:
 ## Phase 2
 ```
 
+Each phase diagram carries four things on one spine: what the phase changed, with `file:line` per step;
+the call path the change runs through, every hop in call order with `file:line`; the design against the
+build, with the measured differences, as a zoom-in anchored to its element; and what is still open, in a
+marked region the user answers with `R:IN` or `R:OUT`.
+
 `## Phase N` is written by `.claude/bin/pr-phase --phase N`. A phase that comes back after review
 adds a new section with `--updated` instead of replacing its old one, so the record keeps what the
 phase first said and what changed after the review.
 
-### The reader never leaves the diagram
-
-Whatever the approver must read to understand the point or to make a decision is inside the drawing.
-
-**A pointer is not content**, and that covers every pointer, not only code:
-
-| Written | Write instead |
-| --- | --- |
-| `solution_exporter.rb:15` | the line itself, quoted |
-| "the decision in 4.1.d" | the decision, stated |
-| "see the plan for phase 3" | what phase 3 does |
-| "per the request" | the sentence from the request |
-| "as the reviewer noted" | what the reviewer said |
-| "#16 above" | restate it here |
-
-The test: someone with no editor, no browser and no access to the repository must be able to
-understand the point and make the decision. If they have to go anywhere, including elsewhere in the
-same diagram, it has failed. Each finding stands alone.
-
-Follow `~/personal/scripts/gate/diagram-convention.md`. It is the written form of
-`~/.claude/excalidraw/jamf-review-findings.excalidraw`, which is the reference every diagram copies:
-one tall column on a vertical spine, stage markers in the left gutter, a dark panel holding the
-verbatim code with `#` comments pointing at the defect, and a green panel holding the change as a
-before/after diff. Green is a proposal, never applied code.
-
-### What each phase diagram must carry
-
-All four, in one drawing with one spine. The Excalidraw rules in `~/.claude/CLAUDE.md` say how to
-draw; this says what to draw.
-
-1. **What the phase changed**, each step labelled with its `file:line`.
-2. **The call path the change runs through**: entry point, every hop in call order, the exit, each
-   with `file:line`. No step is summarised as "then it processes".
-3. **Design against build**, for an interface phase: the measured deltas from `gate.py figma-compare`,
-   as a zoom-in panel anchored to the element they belong to.
-4. **What is still open**: deliberate differences and out-of-scope items in a marked region, so the
-   user can answer with `R:IN` or `R:OUT` on the drawing itself.
-
 ### Publishing a diagram
 
-Draw with the Excalidraw MCP, never by hand-writing JSON. Export all three formats, then:
+Draw with the Excalidraw MCP, never by hand-writing JSON. Export the `.excalidraw` source and the svg, then:
 
 ```
 .claude/bin/pr-diagram --pr <n> --name phase-1 --svg out/phase-1.svg
@@ -537,9 +477,6 @@ Draw with the Excalidraw MCP, never by hand-writing JSON. Export all three forma
 Pass only the svg. `pr-diagram` normalises it to 1x, renders the png from it at 3x, checks the
 diagram is dark, and puts both on `review-assets/<pr>-<slug>`, a branch that is never merged. The
 `.excalidraw` source stays in `~/.claude/excalidraw/` and is never published.
-
-The user answers a diagram by adding marks to it. Read them with
-`~/personal/scripts/excalidraw-marks`, from the svg or from the source. Never read the picture.
 
 ### Creating the pull request
 
@@ -562,7 +499,7 @@ wrote yourself goes in the body.
 
 ![Phase 6: the runbook card](https://git.4me.com/4me/ipaas/blob/review-assets/1027-runbook-view/phase-6.png?raw=1)
 
-[svg](…/phase-6.svg?raw=1) · [source](…/phase-6.excalidraw?raw=1)
+[svg](…/phase-6.svg?raw=1)
 
 <details><summary>Verification and review items</summary>
 

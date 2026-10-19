@@ -109,8 +109,13 @@ path, gate_dir = sys.argv[1], sys.argv[2]
 settings = json.load(open(path)) if os.path.exists(path) else {}
 def command(sub): return {"type": "command", "command": f"python3 {gate_dir}/gate.py {sub}"}
 hooks = settings.setdefault("hooks", {})
+# Only the entry for the same subcommand is replaced: removing every gate.py entry of an event deleted the
+# AskUserQuestion `answers` hook that link-worktree registers beside `launch`. The guard and `answers` hooks
+# are registered by link-worktree in step 9a, for this clone and every worktree.
 def install(event, matcher, sub):
-    entries = [e for e in hooks.get(event, []) if not any("gate.py" in h.get("command", "") for h in e.get("hooks", []))]
+    mine = f"/gate.py {sub}"
+    entries = [entry for entry in hooks.get(event, [])
+               if not any(hook.get("command", "").endswith(mine) for hook in entry.get("hooks", []))]
     entry = {"hooks": [command(sub)]}
     if matcher: entry["matcher"] = matcher
     hooks[event] = entries + [entry]

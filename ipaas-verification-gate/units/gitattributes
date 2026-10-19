@@ -1,0 +1,4 @@
+# Read by the gate through core.attributesFile, for the diffs it parses only. With the ruby driver, the text
+# git prints after a hunk header is the enclosing `def`, so a line moved to another method is another change.
+*.rb diff=ruby
+*.rake diff=ruby
