@@ -662,6 +662,12 @@ class GuardTest(unittest.TestCase):
     def test_a_read_or_a_search_that_mentions_the_gate_is_allowed(self):
         for command in ('grep -rn "gate.py stop" .claude/skills/phase/ceremony.md',
                         "python3 ~/personal/scripts/gate/gate.py 'units' > /tmp/report",
+                        "python3 ~/personal/scripts/gate/gate.py --help",
+                        "ps -axo command | grep -E 'agent_task_finalize|gate.py (finalize|checks)'",
+                        "R=.claude/proof/runs/r1; python3 -c \"import json;print(json.load(open('$R/findings.json'))['status'])\"",
+                        "cd .claude/proof/live && python3 -I -c 'import json\nd = json.load(open(\"runner.json\"))\nprint(len(d) > 0)'",
+                        "python3 - <<'PY'\nimport json\njson.dump({}, open('/tmp/scratch.json', 'w'))\nPY\n"
+                        "python3 ~/personal/scripts/gate/gate.py checks status",
                         "cat .claude/proof/runs/x/findings.json 2>/dev/null | python3 -m json.tool",
                         "python3 $HOME/personal/scripts/gate/gate.py units 2>&1"):
             self.assertFalse(self.denied(command, cwd="/work/wt"), command)

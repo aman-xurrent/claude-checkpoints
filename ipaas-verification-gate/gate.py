@@ -343,9 +343,9 @@ TRACE_STDIN_COMMANDS = ("launch", "stop", "surface", "guard", "pre-push", "answe
 # The fence around the gate, applied to Claude's tools in every ipaas worktree by link_worktree():
 # permission deny rules for what the rule syntax can express, and the guard hook for the rest.
 PHASED_DIRECTORY = Path(__file__).resolve().parent.parent / "phased"
-# A redirect is judged by its target, not by the `>` sign: `cat <file> 2>/dev/null` reads.
-GUARD_WRITE_TOKENS = ("sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "truncate", "python3 -", "cat <<", "ln -",
-                      "install ", "dd ", "of=")
+# A redirect is judged by its target, not by the `>` sign: `cat <file> 2>/dev/null` reads. An inline program
+# is judged on the whole line by what it writes (inline_program_writes_state), not by its interpreter's name.
+GUARD_WRITE_TOKENS = ("sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "truncate", "ln -", "install ", "dd ", "of=")
 # `tmux send-keys` types into a session window, and what it types arrives as the owner's prompt.
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP",
                             "send-pack", "GIT_DIR=", "phased pause", "phased resume", "settings.local.json",
@@ -393,11 +393,21 @@ GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-sectio
                                   "rspec", "randomized-suite", "trace", "review-record", "review-section", "deviation",
                                   "design-links", "figma-compare", "live-record", "comment-fetch", "comment-decide",
                                   "comment-status", "waive", "units")
-# An inline program can write anywhere, and a path can be built from pieces, so a program that names the
-# gate's state in any form is refused as a whole. A script file it runs is out of a deny list's reach.
+# An inline program can write anywhere, and a path can be built from pieces. One that names the state in the
+# home directory, or imports the gate itself, is refused as a whole. One that names a worktree's proof state is
+# refused when it writes: sessions read findings.json with `json.load` all day, 128 times in the trace. A
+# script file it runs is out of a deny list's reach.
 INLINE_INTERPRETERS = re.compile(
     r"\b(?:python3?|ruby|node|perl|bash|sh|zsh)(?:\s+-\w+)*?\s+(?:-[a-zA-Z]*[ce]|--eval|-)(?=$|\s)")
-GATE_STATE_HINTS = (".local/state", "owner-words", "waivers", "unit-cache", ".gate-skip-once", *GUARD_WRITE_PROTECTED)
+HOME_STATE_HINTS = (".local/state", "owner-words", "waivers", "unit-cache", ".gate-skip-once")
+GATE_IMPORT = re.compile(r"\bimport\s+gate\b|\bfrom\s+gate\s+import\b|spec_from_file_location\([^)]*gate|"
+                         r"sys\.path[^\n]*scripts/gate")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>.*?)(?:\n(?P=tag)[ \t]*(?:\n|$)|\Z)", re.DOTALL)
+INTERPRETER_NAME = re.compile(r"^(?:python3?(?:\.\d+)?|ruby|node|perl|bash|sh|zsh)$")
+PROGRAM_FLAGS = ("-c", "-e", "--eval")
+INLINE_WRITES = re.compile(r"""open\((?:[^()]|\([^()]*\))*,\s*(?:mode\s*=\s*)?['"][wax][bt+]*['"]|\.write\(|write_(?:text|bytes)\(|json\.dump\(|"""
+                           r"""os\.(?:replace|rename|remove|unlink)\(|shutil\.|File\.(?:write|open)\(|IO\.write|"""
+                           r"""(?:write|append)FileSync|\.unlink\(""")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 # Hooks every worktree must carry: the guard before a tool runs, and the store of the owner's answers
 # after a question dialog.
@@ -3763,9 +3773,9 @@ def guard_bash(command, cwd=None):
         return "changing the hooks configuration disables the gate."
     # Judged on the whole line: a heredoc puts its program on lines of its own, so no single segment holds
     # both the interpreter and the path.
-    if INLINE_INTERPRETERS.search(command) and any(hint in command for hint in GATE_STATE_HINTS):
-        return ("an inline program that names the gate's state can write it, whatever the path looks like. Read the "
-                "state with the Read tool or a gate.py subcommand (`trace`, `units`, `checks`).")
+    if inline_program_writes_state(command):
+        return ("an inline program that writes the gate's state forges it, whatever the path looks like. Read the "
+                "state with the Read tool, `json.load`, or a gate.py subcommand (`trace`, `units`, `checks`).")
     directory, variables = Path(cwd or os.getcwd()), {}
     for segment in command_segments(command):
         words = segment_words(segment, variables)
@@ -3777,6 +3787,33 @@ def guard_bash(command, cwd=None):
         if reason:
             return reason
     return None
+
+
+def inline_program_writes_state(command):
+    """Judged on the program's own text, so a heredoc that writes a scratch file is not refused because the same
+    line also runs gate.py or reads a findings file."""
+    for program in inline_programs(command):
+        if GATE_IMPORT.search(program):
+            return True
+        if any(hint in program for hint in (*HOME_STATE_HINTS, *GUARD_WRITE_PROTECTED)) and INLINE_WRITES.search(program):
+            return True
+    return False
+
+
+def inline_programs(command):
+    """The text of every inline program on the line: the argument of `-c`, `-e` or `--eval`, and the body of a
+    heredoc fed to an interpreter."""
+    programs = []
+    for match in HEREDOC.finditer(command):
+        opener = command[command.rfind("\n", 0, match.start()) + 1:match.start()]
+        if INLINE_INTERPRETERS.search(f"{opener} "):
+            programs.append(match.group("body"))
+    for segment in command_segments(command):
+        words = segment_words(segment, {})
+        if not words or not INTERPRETER_NAME.match(Path(words[0]).name):
+            continue
+        programs += [words[position + 1] for position, word in enumerate(words[:-1]) if word in PROGRAM_FLAGS]
+    return programs
 
 
 def segment_words(segment, variables):
@@ -3825,7 +3862,7 @@ def guard_program(words):
     print session runs this worktree's hooks, so its prompt, which the session wrote, would be stored the same way."""
     script = gate_script_position(words)
     subcommand = words[script + 1] if script is not None and len(words) > script + 1 else None
-    if subcommand and subcommand not in GUARD_ALLOWED_GATE_SUBCOMMANDS:
+    if subcommand and not subcommand.startswith("-") and subcommand not in GUARD_ALLOWED_GATE_SUBCOMMANDS:
         return (f"`gate.py {subcommand}` is not run from a shell. A hook or git calls the hook subcommands, and "
                 f"the ones a session may run are: {', '.join(GUARD_ALLOWED_GATE_SUBCOMMANDS)}.")
     if words and Path(words[0]).name in CLAUDE_PROGRAMS and PRINT_FLAGS & set(words[1:]):
@@ -3847,10 +3884,15 @@ def full_path(word, directory):
 
 
 def redirect_targets(words):
-    """Where a segment redirects its output, read from its expanded words so `$d/x` is the path the line set.
-    `/dev/null` and a copy into another stream (`2>&1`) write nothing."""
-    targets = re.findall(r"\d*>>?\s*([^\s;&|<>]+)", " ".join(words))
-    return [target for target in targets if target != "/dev/null" and not target.startswith("&")]
+    """Where a segment redirects its output, read from its expanded words so `$d/x` is the path the line set. A
+    `>` inside a quoted program (`len(value) > 0`) is part of one word and redirects nothing. `/dev/null` and a
+    copy into another stream (`2>&1`) write nothing."""
+    targets = []
+    for position, word in enumerate(words):
+        match = re.fullmatch(r"\d*>>?(.*)", word)
+        if match:
+            targets.append(match.group(1) or (words[position + 1] if position + 1 < len(words) else ""))
+    return [target for target in targets if target and target != "/dev/null" and not target.startswith("&")]
 
 
 def guard_segment(segment, words, directory):
@@ -3918,8 +3960,29 @@ def guard_ready(command):
 
 
 def command_segments(command):
-    """Each simple command of a compound line, judged on its own: `cd x && gate.py pr-section` is two segments."""
-    return [part.strip() for part in re.split(r"&&|\|\||;|\||\n", command) if part.strip()]
+    """Each simple command of a compound line, judged on its own: `cd x && gate.py pr-section` is two segments.
+    A separator inside quotes splits nothing: `grep -E 'a|gate.py (finalize|checks)'` is one command."""
+    segments, current, quote, index = [], [], None, 0
+    while index < len(command):
+        character = command[index]
+        if quote is None and command[index:index + 2] in ("&&", "||"):
+            segments.append("".join(current))
+            current, index = [], index + 2
+            continue
+        if quote is None and character in ";|\n":
+            segments.append("".join(current))
+            current, index = [], index + 1
+            continue
+        if character == "\\" and quote != "'":
+            current.append(command[index:index + 2])
+            index += 2
+            continue
+        if character in "'\"" and quote in (None, character):
+            quote = None if quote else character
+        current.append(character)
+        index += 1
+    segments.append("".join(current))
+    return [segment.strip() for segment in segments if segment.strip()]
 
 
 def guard_path(file_path):
