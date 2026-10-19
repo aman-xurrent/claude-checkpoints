@@ -18,9 +18,11 @@ DECLARING_CALLS = %w[private protected public module_function private_constant p
 CONDITIONALS = [Prism::IfNode, Prism::UnlessNode].freeze
 ENTRY_PARENTS = [Prism::HashNode, Prism::KeywordHashNode, Prism::ArrayNode].freeze
 SCOPES = [Prism::DefNode, Prism::ClassNode, Prism::ModuleNode].freeze
-# Code inside a string's interpolation, `"#{e.class}"`, only shapes the text. Removing it was reported as a
-# survivor on PR 1111, but nothing could test a log line's wording.
+# Code inside a log message's interpolation, `"#{e.class}"`, only shapes the text. Removing it was reported as a
+# survivor on PR 1111, but nothing could test a log line's wording. An interpolation that builds a query or a
+# method name is behaviour, and is judged.
 INTERPOLATIONS = [Prism::EmbeddedStatementsNode, Prism::InterpolatedStringNode, Prism::InterpolatedSymbolNode].freeze
+LOG_CALLS = %w[debug info warn error fatal log puts print p].freeze
 # A heredoc's body sits after the line that opens it, outside the node, so removing the node leaves the body
 # behind as code that still parses and then fails to run, which reads as a kill.
 HEREDOC_OPENER = /<<[~-]?(["'`]?)[A-Za-z_]\w*\1/
@@ -69,6 +71,12 @@ def scope_of(ancestors)
   ancestors.select { |node| SCOPES.any? { |kind| node.is_a?(kind) } }.map { |node| node.name.to_s }.join("#")
 end
 
+def inside_log_text?(ancestors)
+  return false unless ancestors.any? { |ancestor| INTERPOLATIONS.any? { |kind| ancestor.is_a?(kind) } }
+
+  ancestors.any? { |ancestor| ancestor.is_a?(Prism::CallNode) && LOG_CALLS.include?(ancestor.name.to_s) }
+end
+
 def statement_line(source, node, ancestors)
   chain = ancestors + [node]
   index = chain.rindex { |each| each.is_a?(Prism::StatementsNode) }
@@ -106,8 +114,7 @@ def units_for(path, added_lines, unparsed)
   units = []
   walk = lambda do |node, ancestors|
     start_line = line_of(source, node.location.start_offset)
-    inside_text = ancestors.any? { |ancestor| INTERPOLATIONS.any? { |kind| ancestor.is_a?(kind) } }
-    if added.include?(start_line) && !inside_text
+    if added.include?(start_line) && !inside_log_text?(ancestors)
       candidates_at(node, ancestors.last).each do |candidate|
         span = candidate[:spans].find do |from, to|
           parses?(source.byteslice(0, from) + candidate[:replacement] + source.byteslice(to, source.bytesize))

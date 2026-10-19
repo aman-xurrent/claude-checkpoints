@@ -129,6 +129,9 @@ PY
 say "9. gate.py setup (worktree, env, databases)"
 python3 "$GATE_DIR/gate.py" setup
 
+say "9b. owner words: keep the decisions recorded before the store went live"
+python3 "$GATE_DIR/grandfather_decisions.py"
+
 say "9a. local phase workflow: hook symlink, links into the main clone and every existing worktree"
 HOOKS_DIR="$(cd "$REPO" && git rev-parse --git-path hooks)"
 case "$(cd "$REPO" && readlink "$HOOKS_DIR/post-checkout" 2>/dev/null)" in

@@ -36,10 +36,13 @@ Read what the sweep proves, and what it does not:
 
 `python3 ~/personal/scripts/gate/gate.py units --measure` removes one changed unit at a time in the gate
 worktree and runs the specs that ran it. It is not part of the proof yet: on PR 1111 it took about ten hours
-under the gate lock for 705 units, so it runs only on request until the owner decides its place. A unit is a statement, an entry of a hash, an array or a keyword argument list, a JSX child
-or attribute, a guard reduced to what it guards (`c && <X/>` to `<X/>`), or a fallback reduced to its left
-side (`a || b` to `a`). Imports, types, comments, `private` and declarations are not units: their users
-carry the proof.
+under the gate lock for 705 units, so it runs only on request until the owner decides its place. It stops
+at `--budget SECONDS` (1200 by default, 0 for no limit), because every proof waits for the lock it holds.
+
+A unit is a statement, an entry of a hash, an array or a keyword argument list, a JSX child or attribute, a
+guard reduced to what it guards (`c && <X/>` to `<X/>`), or a fallback reduced to its left side (`a || b`
+to `a`). Imports, types, comments, `private`, declarations and code inside a log message's interpolation
+are not units: their users carry the proof, and nothing can test a log line's wording.
 
 - `killed`: an example that passed with the change failed without the unit. The unit is tested.
 - `survived`: every spec that ran the unit stays green without it. Nothing tests it.
@@ -52,20 +55,14 @@ carry the proof.
 A runner that writes no report or no coverage makes the stage an error, never a pass, and a stage that
 killed no unit proved nothing, so its status is `unmeasured`. Changed lines that produced no unit (a
 constant, an assignment, a link of a method chain) and files no finder reads (`.erb`, a config file outside
-`platform/app/javascript/`) are listed as not judged: in the run's `findings.json` under `units.not_judged`,
-or in `units.json` for `units --measure`.
+`platform/app/javascript/`) are listed as not judged, under `not_judged` in the report.
 
-Read the report with `python3 ~/personal/scripts/gate/gate.py units`. A survivor is fixed with an
-example that fails without the unit, or by deleting the unit. **It reports for now: survivors do not
-refuse the push until the stage has been measured on real branches.**
+`units --measure` prints the report and the path of its `units.json`. A survivor is fixed with an example
+that fails without the unit, or by deleting the unit. **It reports only: survivors refuse no push.**
 
-If you think a survivor needs no spec, quote the unit to the user and stop. Only their words clear it,
-recorded once they give them:
-`python3 ~/personal/scripts/gate/gate.py waive --unit <digest> --evidence "<their words>"`. The words must
-be whole sentences the user typed in this repository after the unit stage reported the unit. Your summary,
-text the gate printed before they typed it, a pasted block and an option label you wrote are refused. One
-record covers one unit in one worktree, and it stops counting when the unit's text changes. A survivor
-found by `units --measure` cannot be waived: declare a proof and waive the unit its run reports.
+`gate.py waive --unit <digest> --evidence "<their words>"` lets one survivor a proof run reported through,
+on the user's whole sentences typed after that report. While the stage runs only on request, no proof run
+reports a unit, so there is nothing to waive.
 
 `pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer, and
 it judges the branch again at the newest Claude commit: a rebase or an amend that changed a file under a
@@ -130,10 +127,11 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
 
 - The active phase is the number in `.claude/proof/phase`. `prepare-commit-msg` stamps it as `Phase: N`
   on every new commit, whatever its message says. An amend takes the higher of its own phase and the
-  active one. With no phase active, a Claude commit carries no phase and no `[skip ci]`: the hook removes
-  both. A commit a rebase replays (a pick, a reword, a continue after a conflict) keeps its trailers, and
-  a squash keeps its highest phase; the hook says so on standard error. A cherry-pick outside a rebase is
-  a new commit.
+  active one. With no phase active, a Claude commit or amend that adds code carries no phase: the hook
+  removes the trailer and the `[skip ci]` line it wrote. Another skip spelling stays, and pre-push refuses
+  it. A commit a rebase replays (a pick, a reword, a continue after a conflict) keeps its trailers, and a
+  squash keeps its highest phase; the hook says so on standard error. A cherry-pick outside a rebase is a
+  new commit.
 - `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`.
   It refuses a skip keyword on any other code commit, the ones outside the loop included.
   Phases 6 and 7 need a passing, fresh proof like any other Claude commit.

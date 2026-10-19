@@ -39,8 +39,8 @@ Subcommands
   trace       What every gate call was asked and what it answered. [--session ID] [--command NAME]
               [--last N] [--day YYYY-MM-DD] [--failures] [--full] [--sessions]
   answers     PostToolUse hook for AskUserQuestion. Stores what the owner typed in a question dialog.
-  units       The unit report of the latest proof run. `units --measure [--out DIR]` runs the unit
-              stage on this worktree's change, under the gate lock, to measure it.
+  units       The unit report of the latest proof run. `units --measure [--out DIR] [--budget SECONDS]` runs
+              the unit stage on this worktree's change, under the gate lock, to measure it.
   waive --unit DIGEST --evidence "<the owner's words>"   Let one surviving unit through, on the
               owner's own words typed after the run that reported it.
 
@@ -52,6 +52,7 @@ run the spec file under several random seeds and require it to stay green.
 import contextlib
 import fcntl
 import fnmatch
+import functools
 import io
 import hashlib
 import itertools
@@ -68,6 +69,7 @@ import traceback
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import NamedTuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -78,6 +80,9 @@ from pathlib import Path
 # knows about ipaas.
 # =============================================================================
 HOME = Path.home()
+# Every stored time, and the day files named after it, compare as text in this one format.
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+DAY_LENGTH = len("YYYY-MM-DD")
 
 # The repository under test and the disposable worktree the prover works in.
 # Environment variables win over the defaults.
@@ -183,8 +188,9 @@ FINALIZE_TIMEOUT_SECONDS = 1800
 UPSTREAM_BRANCH = "origin/main"
 # Case-insensitive on purpose: git's own convention is `Co-authored-by:`, the commit skill writes
 # `Co-Authored-By:`, and a case-sensitive pattern let a Claude commit past the gate unseen.
-# Leading spaces are allowed: `git merge --squash` writes the squashed commits' messages indented by four.
-CLAUDE_TRAILER_PATTERN = re.compile(r"^\s*Co-authored-by:\s*Claude", re.MULTILINE | re.IGNORECASE)
+# Unindented on purpose: `git merge --squash` indents the squashed commits' messages by four, and the owner's
+# own squash of Claude commits is the owner's commit.
+CLAUDE_TRAILER_PATTERN = re.compile(r"^Co-authored-by:\s*Claude", re.MULTILINE | re.IGNORECASE)
 GATE_EPOCH = "2026-09-06T00:00:00+00:00"
 
 # Toolchain locations and budgets.
@@ -230,6 +236,7 @@ FINDINGS_FILE_NAME = "findings.json"
 LOG_FILE_NAME = "prover.log"
 REFERENCES_DIRECTORY_NAME = "references"
 REVIEWS_DIRECTORY_NAME = "reviews"
+LIVE_DIRECTORY_NAME = "live"
 DEVIATIONS_DIRECTORY_NAME = "deviations"
 # design and spec can excuse a measured difference when the user decided it. process cannot: it
 # records a place where the method did not fit the work, so the next run of the method can be
@@ -325,7 +332,8 @@ SENTENCE_BREAK = re.compile(r"\n\s*(?:[-*\u2022]|\d+[.)])\s+|\n|(?<=[.!?])\s+|[:
 SMART_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "`": None})
 # The lines in which the gate repeats what the owner said: comment-decide, review-section and skip-once. They
 # are an echo of the owner, not the gate speaking, so they never make the owner's own words count as gate text.
-ECHO_LINE = re.compile(r"^\s*(?:their words:|Evidence:)|Reason on record:")
+ECHO_LINE = re.compile(r"^\s*(?:their words:|Evidence:)|Reason on record:|one-shot skip token used")
+NEGATION_END = re.compile(r"\b(?:not|never|no|don't|dont|cannot|can't|won't)$")
 GRANDFATHERED_DECISIONS_FILE = SKIPS_LOG.parent / "grandfathered-decisions.json"
 DECISION_DIGEST_LENGTH = 16
 WAIVERS_DIRECTORY = SKIPS_LOG.parent / "waivers"
@@ -343,17 +351,18 @@ TRACE_STDIN_COMMANDS = ("launch", "stop", "surface", "guard", "pre-push", "answe
 # The fence around the gate, applied to Claude's tools in every ipaas worktree by link_worktree():
 # permission deny rules for what the rule syntax can express, and the guard hook for the rest.
 PHASED_DIRECTORY = Path(__file__).resolve().parent.parent / "phased"
-# A redirect is judged by its target, not by the `>` sign: `cat <file> 2>/dev/null` reads. An inline program
-# is judged on the whole line by what it writes (inline_program_writes_state), not by its interpreter's name.
-GUARD_WRITE_TOKENS = ("sed -i", "tee ", "rm ", "mv ", "cp ", "chmod ", "truncate", "ln -", "install ", "dd ", "of=")
+# The programs that write files. A redirect is judged by its target, not by the `>` sign, and an inline program
+# by what its own text writes, so `cat <file> 2>/dev/null` and `json.load(open(...))` read.
+WRITE_PROGRAMS = ("tee", "rm", "mv", "cp", "chmod", "truncate", "ln", "install", "dd", "touch", "mkdir", "rsync")
 # `tmux send-keys` types into a session window, and what it types arrives as the owner's prompt.
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP",
                             "send-pack", "GIT_DIR=", "phased pause", "phased resume", "settings.local.json",
-                            "launchctl", "send-keys")
-GUARD_WRITE_PROTECTED = (f"{PROOF_DIRECTORY}/runs", f"{PROOF_DIRECTORY}/references", f"{PROOF_DIRECTORY}/reviews",
-                         f"{PROOF_DIRECTORY}/live", f"{PROOF_DIRECTORY}/{BASE_CACHE_NAME}",
-                         f"{PROOF_DIRECTORY}/{FIGMA_MISMATCH_FILE_NAME}", str(DEVIATIONS_PATH), str(COMMENTS_PATH),
-                         "personal/scripts/gate", "personal/scripts/phased", ".local/state/gate", ".local/state/phased")
+                            "launchctl", "send-keys", "GIT_REFLOG_ACTION")
+GUARD_WRITE_PROTECTED = (*(f"{PROOF_DIRECTORY}/{name}" for name in (RUNS_DIRECTORY_NAME, REFERENCES_DIRECTORY_NAME,
+                                                                     REVIEWS_DIRECTORY_NAME, LIVE_DIRECTORY_NAME,
+                                                                     BASE_CACHE_NAME, FIGMA_MISMATCH_FILE_NAME)),
+                         str(DEVIATIONS_PATH), str(COMMENTS_PATH), "personal/scripts/gate", "personal/scripts/phased",
+                         ".local/state/gate", ".local/state/phased")
 GUARD_ALLOWED_COMMANDS = (".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
                           ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram", ".claude/bin/pr-create",
                           ".claude/bin/comment-triage", ".claude/bin/live-record",
@@ -389,24 +398,31 @@ GUARD_COMMENT_POSTING = (
     re.compile(r"addPullRequestReviewThreadReply|addPullRequestReview\b|addComment\b|addPullRequestReviewComment"),
     re.compile(r"\bgh\s+api\b[^|;]*\b(issues|pulls)/\d+/comments"),
 )
-GUARD_ALLOWED_GATE_SUBCOMMANDS = ("references", "checks", "finalize", "pr-section", "link-worktree", "setup-checks",
-                                  "rspec", "randomized-suite", "trace", "review-record", "review-section", "deviation",
-                                  "design-links", "figma-compare", "live-record", "comment-fetch", "comment-decide",
-                                  "comment-status", "waive", "units")
+GUARD_ALLOWED_GATE_SUBCOMMANDS = ("setup", "references", "checks", "finalize", "pr-section", "link-worktree",
+                                  "setup-checks", "rspec", "randomized-suite", "trace", "review-record",
+                                  "review-section", "deviation", "design-links", "figma-compare", "live-record",
+                                  "comment-fetch", "comment-decide", "comment-status", "waive", "units")
 # An inline program can write anywhere, and a path can be built from pieces. One that names the state in the
 # home directory, or imports the gate itself, is refused as a whole. One that names a worktree's proof state is
 # refused when it writes: sessions read findings.json with `json.load` all day, 128 times in the trace. A
 # script file it runs is out of a deny list's reach.
-INLINE_INTERPRETERS = re.compile(
-    r"\b(?:python3?|ruby|node|perl|bash|sh|zsh)(?:\s+-\w+)*?\s+(?:-[a-zA-Z]*[ce]|--eval|-)(?=$|\s)")
+SHELL_NAMES = ("bash", "sh", "zsh")
+INTERPRETERS = ("python", "python3", "ruby", "node", "perl", *SHELL_NAMES)
+INTERPRETER_NAME = re.compile(rf"^(?:{'|'.join(INTERPRETERS)})(?:\.\d+)?$")
+SHELL_COMMAND_FLAG = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
+PYTHON_VALUE_OPTIONS = ("-W", "-X")
+COMMAND_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 HOME_STATE_HINTS = (".local/state", "owner-words", "waivers", "unit-cache", ".gate-skip-once")
 GATE_IMPORT = re.compile(r"\bimport\s+gate\b|\bfrom\s+gate\s+import\b|spec_from_file_location\([^)]*gate|"
                          r"sys\.path[^\n]*scripts/gate")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(?P<tag>\w+)\1[^\n]*\n(?P<body>.*?)(?:\n(?P=tag)[ \t]*(?:\n|$)|\Z)", re.DOTALL)
-INTERPRETER_NAME = re.compile(r"^(?:python3?(?:\.\d+)?|ruby|node|perl|bash|sh|zsh)$")
 PROGRAM_FLAGS = ("-c", "-e", "--eval")
-INLINE_WRITES = re.compile(r"""open\((?:[^()]|\([^()]*\))*,\s*(?:mode\s*=\s*)?['"][wax][bt+]*['"]|\.write\(|write_(?:text|bytes)\(|json\.dump\(|"""
-                           r"""os\.(?:replace|rename|remove|unlink)\(|shutil\.|File\.(?:write|open)\(|IO\.write|"""
+# Writing to the console is printing: `json.dump(..., sys.stdout)` reads a findings file and shows it.
+CONSOLE_WRITES = re.compile(r"sys\.std(?:out|err)\.write\(|json\.dumps?\([^\n]*?sys\.std(?:out|err)|"
+                            r"\$std(?:out|err)\.write")
+INLINE_WRITES = re.compile(r"""open\((?:[^()]|\([^()]*\))*,\s*(?:mode\s*=\s*)?['"][wax][bt+]*['"]|\.write\(|"""
+                           r"""write_(?:text|bytes)\(|json\.dump\(|os\.(?:replace|rename|remove|unlink)\(|shutil\.|"""
+                           r"""File\.write\(|File\.open\([^)]*['"][wa]|IO\.write|"""
                            r"""(?:write|append)FileSync|\.unlink\(""")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 # Hooks every worktree must carry: the guard before a tool runs, and the store of the owner's answers
@@ -436,12 +452,14 @@ PROCESS_MEMO = {}
 # makes at an `edit` stop carries the amend file and one at a `break` stop carries neither, so both are new.
 # A cherry-pick outside a rebase brings a commit into this branch, so it is new too, and `git rebase --quit`
 # leaves REBASE_HEAD behind with no rebase directory, so nothing counts outside one.
-REBASE_DIRECTORIES = ("rebase-merge", "rebase-apply")
+MERGE_DIRECTORY = "rebase-merge"
+APPLY_DIRECTORY = "rebase-apply"
+REBASE_DIRECTORIES = (MERGE_DIRECTORY, APPLY_DIRECTORY)
 PICK_MARKER = "CHERRY_PICK_HEAD"
 CONFLICT_REPLAY_MARKER = "REBASE_HEAD"
-EDIT_STOP_MARKER = "rebase-merge/amend"
+EDIT_STOP_MARKER = f"{MERGE_DIRECTORY}/amend"
 REBASE_REFLOG_ACTION = "rebase"
-PHASE_TRAILER_LINE = re.compile(r"^Phase:\s*(\d+)\s*$", re.MULTILINE)
+PHASE_TRAILER_LINE = re.compile(rf"^{PHASE_TRAILER}:\s*(\d+)\s*$", re.MULTILINE)
 # A skip reason that says nothing waives the push as surely as a real one. One skip in the log reads
 # `<reason>`, copied from the gate's own hint, and it let 14 violations through.
 SKIP_REASON_MINIMUM_CHARACTERS = 12
@@ -487,13 +505,13 @@ UNITS_DIRECTORY = Path(__file__).resolve().parent / "units"
 RUBY_UNIT_FINDER = UNITS_DIRECTORY / "ruby_units.rb"
 SCRIPT_UNIT_FINDER = UNITS_DIRECTORY / "ts_units.js"
 COVERAGE_HOOK = UNITS_DIRECTORY / "coverage_hook.rb"
-TYPESCRIPT_PACKAGE = Path("platform/node_modules/typescript")
 UNIT_CACHE_FILE = HOME / ".local/state/gate/unit-cache.json"
 UNIT_CACHE_KEEP_DAYS = 30
 UNIT_RUBY_SUFFIXES = (".rb", ".rake")
 # The vitest suite lives in the platform project, and the unit stage keys its spec files by runner.
 SCRIPT_PROJECT = "vitest"
 SCRIPT_PROJECT_DIRECTORY = "platform"
+TYPESCRIPT_PACKAGE = Path(SCRIPT_PROJECT_DIRECTORY) / "node_modules/typescript"
 MAX_UNIT_SPEC_FILES = 40
 # The stage holds the gate lock, so the next proof waits for it. A unit not judged inside the budget is
 # reported unmeasured. `units --measure` runs without a budget.
@@ -502,6 +520,8 @@ UNIT_DIGEST_LENGTH = 12
 BLOB_DIGEST_LENGTH = 16
 UNIT_CACHE_KEY_LENGTH = 24
 UNIT_TEXT_PREVIEW = 60
+LINE_TEXT_PREVIEW = 120
+LINE_END = 10 ** 9
 UNIT_FINDER_TIMEOUT_SECONDS = 120
 WAIVER_WORKTREE_KEY_LENGTH = 8
 UNIT_KILLED = "killed"
@@ -571,7 +591,7 @@ def owner_is_gone(record):
 
 
 def now_iso():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime(TIMESTAMP_FORMAT)
 
 
 def run(command, cwd=None, allow_exit_codes=(0,), env=None, timeout=None, input_text=None):
@@ -779,10 +799,18 @@ def patch_digest(patch):
     return hashlib.sha256(patch.encode("utf-8", "surrogateescape")).hexdigest()[:PATCH_DIGEST_LENGTH]
 
 
+RUBY_DEFINITION = re.compile(r"^\s*(def|class|module)\s+((?:self\.)?[\w:]+[?!=]?)")
 HUNK_HEADER = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@ ?(?P<context>.*)$")
 # Documentation cannot change what the code does, and a note left untracked in a worktree is never
 # committed, so counting it would call every proof stale at push time.
 DOCUMENTATION_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc")
+
+
+def definition_name(context):
+    """The definition a hunk sits in, by name only: `def refresh_icon!(changed_by: nil)` reads `def refresh_icon!`,
+    so an upstream edit to the parameters leaves a clean rebase clean."""
+    named = RUBY_DEFINITION.match(context)
+    return f"{named.group(1)} {named.group(2)}" if named else context
 
 
 def patch_identity(patch):
@@ -802,7 +830,7 @@ def patch_identity(patch):
             if line.startswith("index "):
                 continue
             header = HUNK_HEADER.match(line)
-            kept.append(f"@@ {header.group('context')}" if header else line)
+            kept.append(f"@@ {definition_name(header.group('context'))}" if header else line)
     if not kept:
         return EMPTY_CHANGE_IDENTITY
     return hashlib.sha256("\n".join(kept).encode("utf-8", "surrogateescape")).hexdigest()[:CHANGE_IDENTITY_LENGTH]
@@ -825,12 +853,12 @@ def path_identities(patch):
 def proof_base(root, sha, base_ref, base_sha):
     """Where the proof measured from, seen from one commit. The stored base sha stands in when the base branch
     is gone, as when a parent pull request was merged and its branch pruned."""
-    if base_ref and reference_exists(root, base_ref):
-        return git(root, "merge-base", sha, base_ref, allow_exit_codes=(0, 1, 128)).stdout.strip() or None
-    ancestor = base_sha and git(root, "merge-base", "--is-ancestor", base_sha, sha, allow_exit_codes=(0, 1, 128))
-    if ancestor and ancestor.returncode == 0:
-        return base_sha
-    return git(root, "merge-base", sha, base_reference(root), allow_exit_codes=(0, 1, 128)).stdout.strip() or None
+    if not (base_ref and reference_exists(root, base_ref)):
+        ancestor = base_sha and git(root, "merge-base", "--is-ancestor", base_sha, sha, allow_exit_codes=(0, 1, 128))
+        if ancestor and ancestor.returncode == 0:
+            return base_sha
+        base_ref = base_reference(root)
+    return git(root, "merge-base", sha, base_ref, allow_exit_codes=(0, 1, 128)).stdout.strip() or None
 
 
 def commit_delta(root, sha, base_ref=None, base_sha=None):
@@ -849,10 +877,25 @@ def commit_change_identity(root, sha, base_ref=None, base_sha=None):
 
 def evidence_is_fresh(root, record):
     """One answer for proofs, reviews and live records. A record written before identities existed only
-    carries the raw digest, and is judged the old way."""
+    carries the raw digest of the old snapshot, and is judged against a snapshot made the old way."""
     if record.get("change_id"):
         return record["change_id"] == change_identity(root)
-    return record.get("patch_sha") == patch_digest(snapshot_patch(root))
+    return record.get("patch_sha") == patch_digest(legacy_snapshot(root))
+
+
+def legacy_snapshot(root):
+    """The snapshot as the gate built it before identities: no fixed diff settings and no Ruby driver. Building
+    it the new way changed every Ruby digest, which would have called every unfinished proof stale at deploy."""
+    def compute():
+        reference = diff_base(root)
+        exclusions = [f":(exclude){PROOF_DIRECTORY}", f":(exclude){DEVIATIONS_PATH}"]
+        pieces = [git(root, "diff", reference, "--binary", "--no-color", "--no-ext-diff", "--", ".",
+                      *exclusions).stdout]
+        for path in untracked_paths(root):
+            pieces.append(git(root, "diff", "--no-index", "--binary", "--no-color", "--", "/dev/null", path,
+                              allow_exit_codes=(0, 1)).stdout)
+        return "".join(pieces)
+    return memoized(("legacy_snapshot", str(root)), compute)
 
 
 def evidence_stamp(root):
@@ -1238,25 +1281,26 @@ def added_examples(spec_patch):
     the code reverted it proves nothing, and a file-wide check hides it: one vacuous example among
     forty working ones still leaves the file red.
 
-    A description that the patch both removes and adds was moved or reindented rather than written,
-    so it is not treated as new. Without that, reindenting a block would demand that every example
-    in it fail with the change reverted, and specs that are fine would read as vacuous.
+    A description that the patch removes and adds was moved or reindented rather than written, so it is not
+    treated as new. Without that, reindenting a block would demand that every example in it fail with the change
+    reverted, and specs that are fine would read as vacuous. The pairing spans the whole spec patch: with
+    --no-renames a moved spec file is a delete and an add, and its old examples are not new.
 
     A description built by interpolation is skipped, because it cannot be matched against the
     description the runner reports.
     """
-    seen, path = {}, None
-    for line in spec_patch.splitlines():
-        header = re.match(r"diff --git a/(.+?) b/(.+)$", line)
-        if header:
-            path = header.group(2)
-            continue
-        match = EXAMPLE_DEFINITION.match(line)
-        if path and match and "#{" not in match.group(3):
-            sign, description = match.group(1), match.group(3)
-            seen.setdefault(path, {}).setdefault(description, set()).add(sign)
-    return {path: {description for description, signs in descriptions.items() if signs == {"+"}}
-            for path, descriptions in seen.items()}
+    added, removed = {}, set()
+    for block in patch_blocks(spec_patch):
+        path = block_path(block)
+        for line in block.split("\n"):
+            match = EXAMPLE_DEFINITION.match(line)
+            if not match or "#{" in match.group(3):
+                continue
+            if match.group(1) == "-":
+                removed.add(match.group(3))
+            else:
+                added.setdefault(path, set()).add(match.group(3))
+    return {path: descriptions - removed for path, descriptions in added.items()}
 
 
 def rspec_files(project, spec_files, json_path, log, environment=None, extra=(), order="defined"):
@@ -1465,7 +1509,8 @@ def prove(run_directory):
         if proof_status == STATUS_ERROR or not UNIT_STAGE_IN_PROOF:
             reason = ("the proofs did not finish" if proof_status == STATUS_ERROR
                       else "the unit stage runs only with `gate.py units --measure` for now")
-            findings["units"] = {"status": STATUS_NOT_APPLICABLE, "units": [], "reason": reason, "finished_at": now_iso()}
+            findings["units"] = {"status": STATUS_NOT_APPLICABLE, "units": [], "reason": reason,
+                                 "finished_at": now_iso()}
         else:
             findings["units"] = {"status": STATUS_PENDING}
             write_json(findings_path, findings)
@@ -1622,7 +1667,7 @@ def unjudged_lines(added, units, files):
         for number, text in sorted(added.get(path, {}).items()):
             if number in covered.get(path, set()) or is_comment_line(path, text) or CLOSING_ONLY_LINE.match(text):
                 continue
-            rows.append({"path": path, "line": number, "reason": "no unit", "text": text.strip()[:120]})
+            rows.append({"path": path, "line": number, "reason": "no unit", "text": text.strip()[:LINE_TEXT_PREVIEW]})
     return rows
 
 
@@ -1660,9 +1705,9 @@ def unit_spec_candidates(paths, ruby_files, script_files):
     kept, scored = {}, {}
     for path in paths:
         # A fixture under __tests__ (`xproc/__tests__/grammar/function.txt`) is not a test file.
-        runnable = path.endswith("_spec.rb") or is_javascript_test(path)
-        if runnable and not is_system_spec(path) and (GATE_WORKTREE / path).exists():
-            kept.setdefault(project_of(path) if path.endswith("_spec.rb") else SCRIPT_PROJECT, set()).add(path)
+        ruby_spec = path.endswith("_spec.rb")
+        if (ruby_spec or is_javascript_test(path)) and not is_system_spec(path) and (GATE_WORKTREE / path).exists():
+            kept.setdefault(project_of(path) if ruby_spec else SCRIPT_PROJECT, set()).add(path)
     for project, files in specs_for(GATE_WORKTREE, ruby_files).items():
         kept.setdefault(project, set()).update(
             spec for spec in (f"{project}/{each}" for each in files) if not is_system_spec(spec))
@@ -1693,6 +1738,15 @@ def unit_environment():
     environment["DISABLE_BOOTSNAP_COMPILE_CACHE"] = "1"
     environment["GATE_COVERAGE_ROOT"] = str(GATE_WORKTREE)
     return environment
+
+
+class FunctionSpan(NamedTuple):
+    """One function of a vitest coverage report, with its columns, because two callbacks can share a line."""
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    count: int
 
 
 @dataclass
@@ -1784,8 +1838,11 @@ def script_coverage(directory):
         counts, calls = entry.get("s") or {}, entry.get("f") or {}
         statements[relative] = [(span["start"]["line"], span["end"]["line"], counts.get(key, 0))
                                 for key, span in (entry.get("statementMap") or {}).items()]
-        functions[relative] = [(span["loc"]["start"]["line"], span["loc"]["start"].get("column", 0),
-                                span["loc"]["end"]["line"], span["loc"]["end"].get("column", 0), calls.get(key, 0))
+        # vitest 4.1.11's converter writes an end column of Infinity, which JSON stores as null, when nothing maps
+        # after a function's closing brace: it means "to the end of the line".
+        functions[relative] = [FunctionSpan(span["loc"]["start"]["line"], span["loc"]["start"].get("column") or 0,
+                                            span["loc"]["end"]["line"], span["loc"]["end"].get("column") or LINE_END,
+                                            calls.get(key, 0))
                                for key, span in (entry.get("fnMap") or {}).items()]
     return {"statements": statements, "functions": functions}
 
@@ -1806,11 +1863,15 @@ def unit_baseline(candidates, run):
                                          run.environment, run.log, with_coverage=True)
             except subprocess.TimeoutExpired:
                 outcome = run_outcome(False)
-            if not outcome["reported"] or outcome["coverage"] is None:
+            # rspec stops before its suite hooks when a file fails to load, so a load error writes no coverage:
+            # that file is red, not the runner broken.
+            loaded = outcome["coverage"] is not None or outcome["errors_outside"]
+            if not outcome["reported"] or not loaded:
                 baseline["runner_errors"].append(spec)
                 run.log(f"units: {spec} wrote no report or no coverage; the runner failed, not the spec")
                 continue
-            entry = {"project": project, "passed": outcome["passed"], "coverage": outcome["coverage"]}
+            coverage = outcome["coverage"] or {"statements": {}, "functions": {}}
+            entry = {"project": project, "passed": outcome["passed"], "coverage": coverage}
             if outcome["failed"] or outcome["errors_outside"] or not outcome["passed"]:
                 baseline["red"][spec] = entry
                 run.log(f"units: {spec} is not green with the change applied; it judges nothing")
@@ -1824,8 +1885,10 @@ def innermost_function(functions, unit):
     || w)` holds two callbacks on one line."""
     start = (unit["start_line"], unit.get("start_column", 0))
     end = (unit["end_line"], unit.get("end_column", 0))
-    around = [span for span in functions if (span[0], span[1]) <= start and (span[2], span[3]) >= end]
-    return min(around, key=lambda span: (span[2] - span[0], span[3] - span[1])) if around else None
+    around = [span for span in functions
+              if (span.start_line, span.start_column) <= start and (span.end_line, span.end_column) >= end]
+    return min(around, key=lambda span: (span.end_line - span.start_line, span.end_column - span.start_column),
+               default=None)
 
 
 def unit_ran(unit, coverage):
@@ -1834,8 +1897,8 @@ def unit_ran(unit, coverage):
     component would also "run" a callback inside it that nobody called; the innermost function around the
     unit has to have run as well."""
     first, last = unit["anchor_line"], unit["end_line"]
-    function = innermost_function(coverage["functions"].get(unit["path"], []), unit)
-    if function and not function[4]:
+    function = innermost_function([FunctionSpan(*span) for span in coverage["functions"].get(unit["path"], [])], unit)
+    if function and not function.count:
         return False
     return any(count and first <= start <= last for start, _end, count in coverage["statements"].get(unit["path"], []))
 
@@ -1857,7 +1920,7 @@ def unit_cache_key(unit, covering, context):
 
 
 def days_ago(days):
-    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(TIMESTAMP_FORMAT)
 
 
 def read_unit_cache():
@@ -2129,8 +2192,8 @@ def unit_report_lines(units):
 
 
 def units_command(arguments):
-    """The unit report of the latest proof run, or `--measure`: run the unit stage on this worktree's
-    change under the gate lock without a declaration and without a budget, to measure it."""
+    """The unit report of the latest proof run, or `--measure`: run the unit stage on this worktree's change under
+    the gate lock without a declaration, to measure it. `--budget SECONDS` bounds it, and 0 runs it to the end."""
     root = require_repository("units")
     if "--measure" not in arguments:
         run_directory = latest_run(root)
@@ -2143,8 +2206,10 @@ def units_command(arguments):
     directory = Path(given) if given else Path(tempfile.mkdtemp(prefix="gate-units-"))
     directory.mkdir(parents=True, exist_ok=True)
     log = file_logger(directory / LOG_FILE_NAME)
+    # The measure holds the gate lock every proof waits for, so it stops at a budget unless asked for no limit.
+    budget = int(argument_value(arguments, "--budget", UNIT_STAGE_BUDGET_SECONDS))
     with gate_lock(log):
-        result = unit_stage(spec_patch, code_patch, base_sha, paths, directory, log, root, budget=None)
+        result = unit_stage(spec_patch, code_patch, base_sha, paths, directory, log, root, budget=budget or None)
     write_json(directory / "units.json", result)
     print("\n".join(unit_report_lines(result)))
     print(f"report: {directory / 'units.json'}")
@@ -2305,11 +2370,10 @@ def phase_protocol_line(root):
 
 def commit_msg(arguments):
     source = arguments[1] if len(arguments) > 1 else None
-    if source == "merge":
-        return
     message_path = Path(arguments[0])
     root = repository_root(os.getcwd())
-    if root is None:
+    # git reports the commit that ends a conflicted cherry-pick as a merge; it is a new commit on this branch.
+    if root is None or (source == "merge" and not git_path_exists(root, PICK_MARKER)):
         return
     replay = replay_marker(root)
     if replay:
@@ -2322,7 +2386,7 @@ def commit_msg(arguments):
         git(root, "interpret-trailers", "--in-place", "--if-exists", "replace",
             "--trailer", f"{PHASE_TRAILER}: {stamped}", str(message_path))
         write_ci_skip(message_path, stamped)
-    elif CLAUDE_TRAILER_PATTERN.search(message_path.read_text()):
+    elif CLAUDE_TRAILER_PATTERN.search(message_path.read_text()) and stages_code(root):
         drop_phase(message_path)
     for trailer, value in proof_trailers(root, message_path):
         git(root, "interpret-trailers", "--in-place", "--if-exists", "replace", "--trailer", f"{trailer}: {value}",
@@ -2337,11 +2401,12 @@ def replay_marker(root):
     names = (*REBASE_DIRECTORIES, PICK_MARKER, CONFLICT_REPLAY_MARKER, EDIT_STOP_MARKER)
     locations = git(root, "rev-parse", *[part for name in names for part in ("--git-path", name)]).stdout.splitlines()
     present = {name for name, location in zip(names, locations) if (root / location).exists()}
-    if not any(name in present for name in REBASE_DIRECTORIES):
+    if not present & set(REBASE_DIRECTORIES):
         return None
+    for name in (APPLY_DIRECTORY, PICK_MARKER):
+        if name in present:
+            return name
     action = os.environ.get("GIT_REFLOG_ACTION", "")
-    if "rebase-apply" in present or PICK_MARKER in present:
-        return "rebase-apply" if "rebase-apply" in present else PICK_MARKER
     if action.startswith(REBASE_REFLOG_ACTION):
         return f"GIT_REFLOG_ACTION={action}"
     if CONFLICT_REPLAY_MARKER in present and EDIT_STOP_MARKER not in present:
@@ -2377,13 +2442,16 @@ def phase_of_message(message_path):
     return phase_of_body(message_path.read_text())
 
 
+def write_lines(message_path, lines):
+    message_path.write_text("\n".join(lines).rstrip("\n") + "\n")
+
+
 def keep_lines(message_path, keep):
-    """Rewrite the message without the lines `keep` rejects. True when a line went."""
+    """Rewrite the message without the lines `keep` rejects."""
     lines = message_path.read_text().splitlines()
     kept = [line for line in lines if keep(line)]
     if len(kept) != len(lines):
-        message_path.write_text("\n".join(kept).rstrip("\n") + "\n")
-    return len(kept) != len(lines)
+        write_lines(message_path, kept)
 
 
 def keep_highest_phase(root, message_path):
@@ -2418,7 +2486,7 @@ def write_ci_skip(message_path, phase):
     if index > 0 and lines[index - 1].strip():
         block.insert(0, "")
     lines[index:index] = block
-    message_path.write_text("\n".join(lines).rstrip("\n") + "\n")
+    write_lines(message_path, lines)
 
 
 def ci_skip_insertion_point(lines):
@@ -2438,12 +2506,28 @@ def ci_skip_insertion_point(lines):
     return index
 
 
+def stages_code(root):
+    """Whether the commit being made adds code: for an amend, what the amend adds to HEAD."""
+    return any(is_code_path(path) for path in changed_names(root, "diff", "--cached", "--name-only"))
+
+
+def git_path_exists(root, name):
+    location = git(root, "rev-parse", "--git-path", name).stdout.strip()
+    return (root / location).exists()
+
+
+def commit_references_report(root):
+    """The report a commit trailer states: a fresh one when the stored one is stale. A scan that fails falls back
+    to the stored report, as the Stop hook does, so a missing ctags or ast-grep never refuses a commit."""
+    try:
+        return references_report_for(root)
+    except Exception:  # noqa: BLE001 - a trailer is evidence, never a reason to refuse the commit
+        return latest_references_report(root)
+
+
 def proof_trailers(root, message_path):
     """Proof and reference trailers for a Claude commit that touches code."""
-    if not CLAUDE_TRAILER_PATTERN.search(message_path.read_text()):
-        return []
-    staged = changed_names(root, "diff", "--cached", "--name-only")
-    if not any(is_code_path(path) for path in staged):
+    if not CLAUDE_TRAILER_PATTERN.search(message_path.read_text()) or not stages_code(root):
         return []
     trailers = []
     run_directory = latest_run(root)
@@ -2451,10 +2535,10 @@ def proof_trailers(root, message_path):
         findings = read_json(run_directory / FINDINGS_FILE_NAME) or {}
         meta = read_json(run_directory / META_FILE_NAME) or {}
         fresh = "yes" if evidence_is_fresh(root, meta) else "no"
-        trailers += [(PROOF_ID_TRAILER, run_directory.name), (PROOF_STATUS_TRAILER, findings.get("status", STATUS_PENDING)), (PROOF_FRESH_TRAILER, fresh)]
-    # The stored report is used only when it was made from this base and this change: a commit made before any
-    # Stop hook ran carried the verdict of an older change, or none.
-    report = references_report_for(root)
+        trailers += [(PROOF_ID_TRAILER, run_directory.name),
+                     (PROOF_STATUS_TRAILER, findings.get("status", STATUS_PENDING)), (PROOF_FRESH_TRAILER, fresh)]
+    # A commit made before any Stop hook ran carried the verdict of an older change, or none.
+    report = commit_references_report(root)
     if report and report.get("verdict") != STATUS_NOT_APPLICABLE:
         trailers.append((REFERENCES_VERDICT_TRAILER, report["verdict"]))
         if report.get("dynamic_dispatch_sites"):
@@ -2536,12 +2620,12 @@ def store_owner_words(payload, source, text):
     are not the owner's words. Only the owner can read the file, two sessions cannot interleave a line, and
     a failure here never stops the hook that called it."""
     text = QUOTED_BLOCKS.sub(" ", text or "").strip()
-    if not text or MACHINE_PROMPT_SHAPES.match(text) or text == NOTES_ONLY_ANSWER:
+    if not text or MACHINE_PROMPT_SHAPES.match(text):
         return
     record = {"at": now_iso(), "source": source, "session": payload.get("session_id"), "cwd": payload.get("cwd"),
               "text": text}
     try:
-        append_json_line(OWNER_WORDS_DIRECTORY / f"{record['at'][:len('YYYY-MM-DD')]}.jsonl", record)
+        append_json_line(OWNER_WORDS_DIRECTORY / f"{record['at'][:DAY_LENGTH]}.jsonl", record)
         prune_owner_words()
     except OSError:
         pass
@@ -2558,7 +2642,7 @@ def append_json_line(path, record):
 
 
 def prune_owner_words():
-    cutoff = days_ago(OWNER_WORDS_KEEP_DAYS)[:len("YYYY-MM-DD")]
+    cutoff = days_ago(OWNER_WORDS_KEEP_DAYS)[:DAY_LENGTH]
     for path in OWNER_WORDS_DIRECTORY.glob("*.jsonl"):
         if path.stem < cutoff:
             path.unlink(missing_ok=True)
@@ -2582,13 +2666,26 @@ def read_json_lines(path):
     return records
 
 
-def sentence_pieces(text):
-    """A text as its sentences. Case, accents written two ways, curly quotes, backticks, spacing, wrapping
-    quotes and a closing full stop do not change what someone said; a closing question mark does."""
+@functools.lru_cache(maxsize=None)
+def split_sentences(text):
+    """A text as its sentences, each with whether it may start a quote. Case, accents written two ways, curly
+    quotes, backticks, spacing, wrapping quotes and a closing full stop do not change what someone said; a closing
+    question mark does. A soft start (a line break, a colon, a dash, a list marker) that follows a negation is no
+    start: "Do not: waive this unit." and "Please do not" then "waive this unit" on the next line say no."""
     text = unicodedata.normalize("NFC", text or "").translate(SMART_QUOTES).casefold()
-    pieces = [re.sub(r"\s+", " ", piece).strip().strip("\"'").strip().rstrip(".!").strip()
-              for piece in SENTENCE_BREAK.split("\n" + text)]
-    return [piece for piece in pieces if piece]
+    parts = SENTENCE_BREAK.split("\n" + text)
+    pieces, previous_raw = [], ""
+    for raw in parts:
+        piece = re.sub(r"\s+", " ", raw).strip().strip("\"'").strip().rstrip(".!").strip()
+        if piece:
+            soft = not previous_raw.rstrip().endswith((".", "!", "?"))
+            pieces.append((piece, not (soft and NEGATION_END.search(pieces[-1][0])) if pieces else True))
+            previous_raw = raw
+    return tuple(pieces)
+
+
+def sentence_pieces(text):
+    return [piece for piece, _start in split_sentences(text)]
 
 
 def comparable(text):
@@ -2598,19 +2695,19 @@ def comparable(text):
 def says_whole(text, quote):
     """The quote is whole sentences of the text: it starts where a sentence starts and ends where one ends, and
     a sentence the owner wrapped across two lines still reads as one. "waive this unit" is not said by "do not
-    waive this unit, it needs a spec"."""
+    waive this unit, it needs a spec". `quote` is already comparable."""
     joined, starts, ends = "", set(), set()
-    for piece in sentence_pieces(text):
+    for piece, may_start in split_sentences(text):
         joined += " " if joined else ""
-        starts.add(len(joined))
+        if may_start:
+            starts.add(len(joined))
         joined += piece
         ends.add(len(joined))
-    wanted = comparable(quote)
-    position = joined.find(wanted) if wanted else -1
+    position = joined.find(quote) if quote else -1
     while position != -1:
-        if position in starts and position + len(wanted) in ends:
+        if position in starts and position + len(quote) in ends:
             return True
-        position = joined.find(wanted, position + 1)
+        position = joined.find(quote, position + 1)
     return False
 
 
@@ -2643,14 +2740,14 @@ def owner_said(evidence, root, after=None, before=None):
     the gate had not printed them first. `after` is what the decision answers; `before` is when it was
     recorded. An option label in a question dialog is the session's text and never counts."""
     quote = comparable(evidence)
-    if len(quote) < EVIDENCE_MINIMUM_CHARACTERS or quote.endswith("?"):
+    if len((evidence or "").strip().strip("\"'").strip()) < EVIDENCE_MINIMUM_CHARACTERS or quote.endswith("?"):
         return False
     places = [real_path(place) for place in repository_worktrees(root)]
     return any(owner_typed(record, quote, places, after, before) for record in owner_words())
 
 
 def owner_typed(record, quote, places, after, before):
-    """A question is not a decision, and an option label is the session's text."""
+    """Whether this record holds the quote as the owner's own words. An option label is the session's text."""
     if record.get("source") == OWNER_SOURCE_OPTION or not inside_window(record, after, before):
         return False
     if not inside_any(record.get("cwd"), places) or not says_whole(record.get("text"), quote):
@@ -2745,11 +2842,12 @@ def made_of_labels(text, labels):
     parts = text.split(", ")
     position = 0
     while position < len(parts):
-        ends = [end for end in range(len(parts), position, -1) if comparable(", ".join(parts[position:end])) in labels]
-        if not ends:
+        ends = range(len(parts), position, -1)
+        end = next((end for end in ends if comparable(", ".join(parts[position:end])) in labels), None)
+        if end is None:
             return False
-        position = ends[0]
-    return bool(parts)
+        position = end
+    return True
 
 
 def pushed_revisions(root, local_sha, remote_sha):
@@ -2770,8 +2868,7 @@ def already_upstream(root, sha):
 
 
 def touches_code(root, sha):
-    files = changed_names(root, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
-    return any(is_code_path(path) for path in files)
+    return any(is_code_path(path) for path in commit_paths(root, sha))
 
 
 def commit_facts(root, sha):
@@ -2790,10 +2887,10 @@ def owes_proof(root, sha):
 
 
 def tip_freshness_violations(root, revisions):
-    """A trailer records what was true when its commit was written. A rebase that resolves a conflict
-    changes the code under the commits and keeps their trailers, so the newest commit that owes a proof is
-    judged again here, against that proof. A later commit that owes none, one with only specs or one the
-    owner made, is not the proof's business."""
+    """A trailer records what was true when its commit was written. A rebase that resolves a conflict changes
+    the code under the commits and keeps their trailers, so the files of the newest proof are judged again here.
+    Each file is read at the newest Claude commit that touched it: a spec committed after the code belongs to
+    the proof, and the owner's own commits on top are not the proof's business."""
     proven = [sha for sha in revisions if owes_proof(root, sha)]
     if not proven:
         return []
@@ -2801,34 +2898,55 @@ def tip_freshness_violations(root, revisions):
     meta = read_json(runs_directory(root) / proof_id / META_FILE_NAME) if proof_id else None
     if not meta or not meta.get("change_id"):
         return []
-    # The newest Claude commit: a spec committed after the code belongs to the proof, the owner's own do not.
-    target = next(sha for sha in revisions if commit_facts(root, sha)["claude"])
-    short = target[:SHORT_SHA_LENGTH]
-    delta = commit_delta(root, target, meta.get("base_ref"), meta.get("base_sha"))
-    if delta is None:
+    stale = stale_paths(root, meta, revisions, proven[0])
+    short = proven[0][:SHORT_SHA_LENGTH]
+    if stale is None:
         base = meta.get("base_ref") or base_reference(root)
         return [f"{short}: the base proof {proof_id} measured from ({base}) has no merge-base with this commit in "
                 "this clone. Fetch it and push again."]
-    stale = stale_paths(meta, delta)
     if not stale:
         return []
     listed = ", ".join(stale[:LISTED_FILES_LIMIT])
-    return [f"{short}: proof {proof_id} proved a different change than the one this commit carries ({listed}). "
-            "A rebase or an amend changed the code under it. Redeclare to re-prove, then amend."]
+    return [f"{short}: proof {proof_id} proved a different change than the one this push carries ({listed}). A "
+            "rebase or an amend changed the code under it. Redeclare to re-prove, then amend the newest commit "
+            "that touches code, so it carries the new Proof-Id."]
 
 
-def stale_paths(meta, delta):
-    """The files the proof saw that the pushed commit carries differently. A file the proof saw that the commit
-    lacks counts only when it owes a proof: an untracked picture or script that sat in the worktree is never
-    committed, and that is no reason to refuse. A file the proof never saw belongs to a later change, which
-    carries its own proof, or to the owner. A run recorded before per-file identities is judged as a whole."""
+def stale_paths(root, meta, revisions, proven):
+    """The files the proof saw that the push carries differently, or None when no base can be found. A file the
+    proof saw that no commit carries counts only when it owes a proof: an untracked picture or script that sat
+    in the worktree is never committed, and that is no reason to refuse. A file the proof never saw belongs to a
+    later change, which carries its own proof, or to the owner. A run recorded before per-file identities is
+    judged as a whole, at the proven commit."""
     proved = meta.get("path_ids")
+    deltas = {}
+
+    def identities_at(sha):
+        if sha not in deltas:
+            delta = commit_delta(root, sha, meta.get("base_ref"), meta.get("base_sha"))
+            deltas[sha] = None if delta is None else (patch_identity(delta), path_identities(delta))
+        return deltas[sha]
     if proved is None:
-        return [] if patch_identity(delta) == meta["change_id"] else ["the whole change"]
-    carried = path_identities(delta)
-    changed = [path for path, identity in proved.items() if path in carried and carried[path] != identity]
-    missing = [path for path in proved if path not in carried and owes_proof_path(path)]
-    return sorted(changed + missing)
+        whole = identities_at(proven)
+        return None if whole is None else ([] if whole[0] == meta["change_id"] else ["the whole change"])
+    touched_by = {}
+    for sha in revisions:
+        if commit_facts(root, sha)["claude"]:
+            for path in commit_paths(root, sha):
+                touched_by.setdefault(path, sha)
+    stale = []
+    for path, identity in proved.items():
+        found = identities_at(touched_by.get(path, proven))
+        if found is None:
+            return None
+        carried = found[1]
+        if (path in carried and carried[path] != identity) or (path not in carried and owes_proof_path(path)):
+            stale.append(path)
+    return sorted(stale)
+
+
+def commit_paths(root, sha):
+    return changed_names(root, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
 
 
 def owes_proof_path(path):
@@ -2902,7 +3020,7 @@ def diff_lines(root, base, path):
     if not disk.exists():
         old = git(root, "show", f"{base}:{path}", allow_exit_codes=(0, 128)).stdout.splitlines()
         return [], list(enumerate(old, 1))
-    diff = git(root, *DIFF_CONFIGURATION, "diff", "--unified=0", *DIFF_FLAGS, base, "--", path).stdout
+    diff = git_diff(root, "--unified=0", *DIFF_FLAGS, base, "--", path).stdout
     changed = list(hunk_lines(diff))
     return ([(new, text) for kind, _old, new, text in changed if kind == "+"],
             [(old, text) for kind, old, _new, text in changed if kind == "-"])
@@ -3526,7 +3644,7 @@ def figma_compare(arguments):
     moved = [each for each in findings if each.get("kind") == "moved"]
     missing = [each for each in findings if each.get("kind") == "missing"]
     if root:
-        record_mismatch(root, bool(moved or missing))
+        record_mismatch(root, design_path, bool(moved or missing))
     excused = [each for each in findings if each.get("kind") == "excused"]
     if "--json" in arguments:
         print(json.dumps({"matched": matched, "moved": moved, "missing": missing, "excused": excused}, indent=2))
@@ -3670,31 +3788,43 @@ def deviation_problems(record):
         problems.append("--reason wants one line saying why")
     if record["decided_by"] not in DEVIATION_DECIDERS:
         problems.append(f"--decided-by must be one of {', '.join(DEVIATION_DECIDERS)}")
-    if record["decided_by"] == "user" and record["region"] and not record["evidence_after"]:
-        problems.append("--region excuses a difference figma-compare reported, and it has reported none in this "
-                        "worktree. Run figma-compare first, then record the owner's answer to what it reports.")
-    elif record["decided_by"] == "user":
-        problem = owner_evidence_problem(record["evidence"], Path(record["worktree"]), after=record["evidence_after"])
-        if problem:
-            problems.append(problem + " Only a decision the owner made lets a mismatch pass.")
+    if record["decided_by"] == "user":
+        problems += owner_decision_problems(record)
     return problems
+
+
+def owner_decision_problems(record):
+    if record["region"] and not record["evidence_after"]:
+        return ["--region excuses a difference figma-compare reported, and it has reported none in this worktree. "
+                "Run figma-compare first, then record the owner's answer to what it reports."]
+    problem = owner_evidence_problem(record["evidence"], Path(record["worktree"]), after=record["evidence_after"])
+    return [problem + " Only a decision the owner made lets a mismatch pass."] if problem else []
 
 
 def figma_mismatch_path(root):
     return proof_directory(root) / FIGMA_MISMATCH_FILE_NAME
 
 
-def record_mismatch(root, differs):
-    """When figma-compare first reported the difference a deliberate one answers. A compare that matches ends
-    it, so words typed before an earlier, fixed difference cannot answer a new one."""
+def record_mismatch(root, design, differs):
+    """When figma-compare first reported the difference a deliberate one answers, per design file. A compare of
+    that design that matches ends its window, so words typed before an earlier, fixed difference cannot answer a
+    new one; a match on another frame leaves this one's window alone."""
+    windows = read_json(figma_mismatch_path(root), default={}) or {}
+    if not isinstance(windows, dict) or "first_mismatch_at" in windows:
+        windows = {}
+    key = str(Path(design).resolve())
     if not differs:
-        figma_mismatch_path(root).unlink(missing_ok=True)
-    elif not figma_mismatch_path(root).exists():
-        write_json(figma_mismatch_path(root), {"first_mismatch_at": now_iso()})
+        windows.pop(key, None)
+    else:
+        windows.setdefault(key, now_iso())
+    write_json(figma_mismatch_path(root), windows)
 
 
 def first_mismatch_at(root):
-    return (read_json(figma_mismatch_path(root)) or {}).get("first_mismatch_at")
+    """The earliest window still open in this worktree: the owner's answer must come after the difference it
+    answers, and a deviation does not say which design it answers."""
+    windows = read_json(figma_mismatch_path(root), default={}) or {}
+    return min(windows.values()) if isinstance(windows, dict) and windows else None
 
 
 def deviation(arguments):
@@ -3771,14 +3901,17 @@ def guard_bash(command, cwd=None):
         return "`git commit -n` skips the commit hooks that stamp the proof and phase trailers."
     if re.search(r"\bgit\s+config\b.*\bhooks", command):
         return "changing the hooks configuration disables the gate."
-    # Judged on the whole line: a heredoc puts its program on lines of its own, so no single segment holds
-    # both the interpreter and the path.
-    if inline_program_writes_state(command):
+    commands, shell_bodies = split_heredocs(command)
+    segments = command_segments(commands)
+    if inline_program_writes_state(command, segments):
         return ("an inline program that writes the gate's state forges it, whatever the path looks like. Read the "
                 "state with the Read tool, `json.load`, or a gate.py subcommand (`trace`, `units`, `checks`).")
+    # What a shell runs from a heredoc, `bash -c`, `eval` or `$(...)` is a command of its own, judged the same way.
+    nested = shell_bodies + [dollar or backtick for dollar, backtick in COMMAND_SUBSTITUTION.findall(commands)]
     directory, variables = Path(cwd or os.getcwd()), {}
-    for segment in command_segments(command):
+    for segment in segments:
         words = segment_words(segment, variables)
+        nested += shell_program_text(words)
         reason = guard_program(words)
         if reason:
             return reason
@@ -3786,29 +3919,60 @@ def guard_bash(command, cwd=None):
         reason = guard_segment(segment, words, directory)
         if reason:
             return reason
-    return None
+    return next(filter(None, (guard_bash(program, str(directory)) for program in nested)), None)
 
 
-def inline_program_writes_state(command):
+def split_heredocs(command):
+    """The command with every heredoc body taken out, and the bodies a shell runs. A body fed to `cat` or `git
+    commit -F -` is data: a line of it that starts with `gate.py surface` is not a command, and an apostrophe in
+    it opens no quote."""
+    kept, bodies, end = [], [], 0
+    for match in HEREDOC.finditer(command):
+        kept.append(command[end:match.start("body")])
+        line = heredoc_line(command, match)
+        if any(Path(word).name in SHELL_NAMES for word in line.split()):
+            bodies.append(match.group("body"))
+        end = match.end("body")
+    kept.append(command[end:])
+    return "".join(kept), bodies
+
+
+def heredoc_line(command, match):
+    """The whole line that opens a heredoc: `cat <<'EOF' | python3 -` feeds python as surely as `python3 - <<EOF`."""
+    start = command.rfind("\n", 0, match.start()) + 1
+    return command[start:command.find("\n", match.start())]
+
+
+def shell_program_text(words):
+    """The text a shell runs from `bash -c '...'` (or `-lc`), or `eval ...`."""
+    if not words:
+        return []
+    if words[0] == "eval":
+        return [" ".join(words[1:])]
+    if Path(words[0]).name not in SHELL_NAMES:
+        return []
+    return [words[position + 1] for position, word in enumerate(words[:-1]) if SHELL_COMMAND_FLAG.match(word)]
+
+
+def inline_program_writes_state(command, segments):
     """Judged on the program's own text, so a heredoc that writes a scratch file is not refused because the same
-    line also runs gate.py or reads a findings file."""
-    for program in inline_programs(command):
+    line also runs gate.py or reads a findings file. Printing is not writing."""
+    for program in inline_programs(command, segments):
         if GATE_IMPORT.search(program):
             return True
-        if any(hint in program for hint in (*HOME_STATE_HINTS, *GUARD_WRITE_PROTECTED)) and INLINE_WRITES.search(program):
+        written = CONSOLE_WRITES.sub("", program)
+        names_state = any(hint in program for hint in (*HOME_STATE_HINTS, *GUARD_WRITE_PROTECTED))
+        if names_state and INLINE_WRITES.search(written):
             return True
     return False
 
 
-def inline_programs(command):
+def inline_programs(command, segments):
     """The text of every inline program on the line: the argument of `-c`, `-e` or `--eval`, and the body of a
-    heredoc fed to an interpreter."""
-    programs = []
-    for match in HEREDOC.finditer(command):
-        opener = command[command.rfind("\n", 0, match.start()) + 1:match.start()]
-        if INLINE_INTERPRETERS.search(f"{opener} "):
-            programs.append(match.group("body"))
-    for segment in command_segments(command):
+    heredoc fed to an interpreter, with or without the `-`."""
+    programs = [match.group("body") for match in HEREDOC.finditer(command)
+                if any(INTERPRETER_NAME.match(Path(word).name) for word in heredoc_line(command, match).split())]
+    for segment in segments:
         words = segment_words(segment, {})
         if not words or not INTERPRETER_NAME.match(Path(words[0]).name):
             continue
@@ -3836,9 +4000,9 @@ def segment_words(segment, variables):
 
 
 def expand_word(word, variables):
-    def value(match):
+    def replacement(match):
         return variables.get(match.group(1), os.environ.get(match.group(1), match.group(0)))
-    word = re.sub(r"\$\{?(\w+)\}?", value, word)
+    word = re.sub(r"\$\{?(\w+)\}?", replacement, word)
     name, equals, value = word.partition("=")
     if equals and SHELL_ASSIGNMENT.match(word):
         return f"{name}={os.path.expanduser(value)}"
@@ -3847,24 +4011,36 @@ def expand_word(word, variables):
 
 def gate_script_position(words):
     """Where a segment names gate.py as the script it runs: first, or after a python interpreter and its
-    options. A glob that matches the name (`gate.p?`) counts, and so does any directory."""
+    options, or as `python3 -m gate`. A glob that matches the name (`gate.p?`) counts, and so does any directory."""
     position = 0
     if words and Path(words[0]).name.startswith("python"):
-        position = 1 + len(list(itertools.takewhile(lambda word: word.startswith("-"), words[1:])))
+        position = 1
+        while position < len(words) and words[position].startswith("-"):
+            if words[position] == "-m":
+                return position + 1 if words[position + 1:position + 2] == ["gate"] else None
+            position += 2 if words[position] in PYTHON_VALUE_OPTIONS else 1
     if position < len(words) and fnmatch.fnmatch("gate.py", Path(words[position]).name):
         return position
     return None
+
+
+def gate_subcommand(words):
+    """The subcommand a segment runs gate.py with: None when it runs no gate.py, "" when it names none."""
+    script = gate_script_position(words)
+    if script is None:
+        return None
+    subcommand = words[script + 1] if len(words) > script + 1 else ""
+    return "" if subcommand.startswith("-") else subcommand
 
 
 def guard_program(words):
     """A gate.py call runs only a subcommand the protocol lists, however it is spelled: `gate.py ''surface`,
     `S=surface; gate.py $S` and `gate.p? surface` each stored the session's text as the owner's words. A nested
     print session runs this worktree's hooks, so its prompt, which the session wrote, would be stored the same way."""
-    script = gate_script_position(words)
-    subcommand = words[script + 1] if script is not None and len(words) > script + 1 else None
-    if subcommand and not subcommand.startswith("-") and subcommand not in GUARD_ALLOWED_GATE_SUBCOMMANDS:
-        return (f"`gate.py {subcommand}` is not run from a shell. A hook or git calls the hook subcommands, and "
-                f"the ones a session may run are: {', '.join(GUARD_ALLOWED_GATE_SUBCOMMANDS)}.")
+    subcommand = gate_subcommand(words)
+    if subcommand and subcommand not in GUARD_ALLOWED_GATE_SUBCOMMANDS:
+        return (f"`gate.py {subcommand}` is not one a session runs. A hook or git runs the hook subcommands, and a "
+                f"session may run: {', '.join(GUARD_ALLOWED_GATE_SUBCOMMANDS)}.")
     if words and Path(words[0]).name in CLAUDE_PROGRAMS and PRINT_FLAGS & set(words[1:]):
         return ("a nested `claude -p` runs this worktree's hooks, so its prompt, which this session wrote, would be "
                 "stored as the owner's words.")
@@ -3875,12 +4051,11 @@ def segment_directory(words, directory):
     """After `cd x` or `pushd x`, the later segments run in x, so their relative paths are read from there."""
     if len(words) < 2 or words[0] not in DIRECTORY_CHANGERS:
         return directory
-    target = Path(words[1])
-    return target if target.is_absolute() else directory / target
+    return directory / words[1]
 
 
 def full_path(word, directory):
-    return os.path.normpath(word if os.path.isabs(word) else directory / word)
+    return os.path.normpath(directory / word)
 
 
 def redirect_targets(words):
@@ -3889,7 +4064,7 @@ def redirect_targets(words):
     copy into another stream (`2>&1`) write nothing."""
     targets = []
     for position, word in enumerate(words):
-        match = re.fullmatch(r"\d*>>?(.*)", word)
+        match = re.fullmatch(r"(?:\d*|&)>>?(.*)", word)
         if match:
             targets.append(match.group(1) or (words[position + 1] if position + 1 < len(words) else ""))
     return [target for target in targets if target and target != "/dev/null" and not target.startswith("&")]
@@ -3925,16 +4100,27 @@ def guard_segment(segment, words, directory):
             return f"redirecting into `{target}` would forge or weaken the gate."
     if guard_allowed_invocation(words):
         return None
-    if any(token in segment for token in GUARD_WRITE_TOKENS):
+    if writes_files(words):
         return f"writing under `{touched[0]}` would forge or weaken the gate. Read it if you need to; never write it."
     return None
 
 
+def writes_files(words):
+    """Whether the segment's program writes files: `rm`, `tee`, `dd of=`, `sed -i`. Judged by the program, so
+    `git add` and `yarn install` write nothing here, and neither does a quoted message that holds "form"."""
+    if not words:
+        return False
+    program = Path(words[0]).name
+    if program == "sed":
+        return any(word.startswith("-i") or word == "--in-place" for word in words[1:])
+    return program in WRITE_PROGRAMS
+
+
 def guard_allowed_invocation(words):
     """A gate.py subcommand the protocol lists, and the wrapper and daemon commands it asks for."""
-    script = gate_script_position(words)
-    if script is not None:
-        return len(words) <= script + 1 or words[script + 1] in GUARD_ALLOWED_GATE_SUBCOMMANDS
+    subcommand = gate_subcommand(words)
+    if subcommand is not None:
+        return subcommand == "" or subcommand in GUARD_ALLOWED_GATE_SUBCOMMANDS
     for allowed in GUARD_ALLOWED_COMMANDS:
         parts = allowed.split()
         if len(words) >= len(parts) and words[0].endswith(parts[0]) and words[1:len(parts)] == parts[1:]:
@@ -3969,7 +4155,8 @@ def command_segments(command):
             segments.append("".join(current))
             current, index = [], index + 2
             continue
-        if quote is None and character in ";|\n":
+        background = character == "&" and command[index - 1:index] == " " and command[index + 1:index + 2] in (" ", "")
+        if quote is None and (character in ";|\n" or background):
             segments.append("".join(current))
             current, index = [], index + 1
             continue
@@ -4982,7 +5169,7 @@ def record_trace(command, arguments, stdin_text, stdout_text, stderr_text, exit_
                 payload = {}
         moment = datetime.now(timezone.utc)
         record = {
-            "at": moment.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "at": moment.strftime(TIMESTAMP_FORMAT),
             "pid": os.getpid(),
             "command": command,
             "arguments": list(arguments),
@@ -4999,7 +5186,7 @@ def record_trace(command, arguments, stdin_text, stdout_text, stderr_text, exit_
         if failure:
             record["error"] = clip(failure)
         # The trace holds every prompt as the stdin of `surface`, so only the owner may read it.
-        append_json_line(TRACE_DIRECTORY / f"{moment.strftime('%Y-%m-%d')}.jsonl", record)
+        append_json_line(TRACE_DIRECTORY / f"{moment.strftime(TIMESTAMP_FORMAT)[:DAY_LENGTH]}.jsonl", record)
         if moment.minute == 0:
             prune_traces()
     except Exception:  # tracing is evidence, never a gate of its own
@@ -5453,7 +5640,6 @@ def comment_check(root, paths):
 #
 # The session chooses the url and the expression. It never writes the result.
 
-LIVE_DIRECTORY_NAME = "live"
 LIVE_KINDS = ("browser", "runner")
 LIVE_WRAPPER = ".claude/bin/live-record"
 USER_FACING_PREFIXES = FRONTEND_LOGIC + ("platform/app/views/", "platform/app/presenters/",

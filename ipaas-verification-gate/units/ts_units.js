@@ -21,7 +21,7 @@ const ENTRY_HOLDERS = new Set([KINDS.ObjectLiteralExpression, KINDS.ArrayLiteral
 const IGNORED_ATTRIBUTES = new Set(["key"]);
 const SCOPES = new Set([
   KINDS.FunctionDeclaration, KINDS.MethodDeclaration, KINDS.ClassDeclaration, KINDS.ArrowFunction,
-  KINDS.FunctionExpression,
+  KINDS.FunctionExpression, KINDS.GetAccessor, KINDS.SetAccessor, KINDS.Constructor,
 ]);
 
 function scriptKind(path) {
