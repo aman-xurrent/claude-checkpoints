@@ -18,6 +18,9 @@ DECLARING_CALLS = %w[private protected public module_function private_constant p
 CONDITIONALS = [Prism::IfNode, Prism::UnlessNode].freeze
 ENTRY_PARENTS = [Prism::HashNode, Prism::KeywordHashNode, Prism::ArrayNode].freeze
 SCOPES = [Prism::DefNode, Prism::ClassNode, Prism::ModuleNode].freeze
+# Code inside a string's interpolation, `"#{e.class}"`, only shapes the text. Removing it was reported as a
+# survivor on PR 1111, but nothing could test a log line's wording.
+INTERPOLATIONS = [Prism::EmbeddedStatementsNode, Prism::InterpolatedStringNode, Prism::InterpolatedSymbolNode].freeze
 # A heredoc's body sits after the line that opens it, outside the node, so removing the node leaves the body
 # behind as code that still parses and then fails to run, which reads as a kill.
 HEREDOC_OPENER = /<<[~-]?(["'`]?)[A-Za-z_]\w*\1/
@@ -103,7 +106,8 @@ def units_for(path, added_lines, unparsed)
   units = []
   walk = lambda do |node, ancestors|
     start_line = line_of(source, node.location.start_offset)
-    if added.include?(start_line)
+    inside_text = ancestors.any? { |ancestor| INTERPOLATIONS.any? { |kind| ancestor.is_a?(kind) } }
+    if added.include?(start_line) && !inside_text
       candidates_at(node, ancestors.last).each do |candidate|
         span = candidate[:spans].find do |from, to|
           parses?(source.byteslice(0, from) + candidate[:replacement] + source.byteslice(to, source.bytesize))

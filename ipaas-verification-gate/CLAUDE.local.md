@@ -34,8 +34,9 @@ Read what the sweep proves, and what it does not:
 
 ## Every changed unit is removed, one at a time
 
-After the sweep, the prover removes one changed unit at a time in the gate worktree and runs the specs
-that ran it. A unit is a statement, an entry of a hash, an array or a keyword argument list, a JSX child
+`python3 ~/personal/scripts/gate/gate.py units --measure` removes one changed unit at a time in the gate
+worktree and runs the specs that ran it. It is not part of the proof yet: on PR 1111 it took about ten hours
+under the gate lock for 705 units, so it runs only on request until the owner decides its place. A unit is a statement, an entry of a hash, an array or a keyword argument list, a JSX child
 or attribute, a guard reduced to what it guards (`c && <X/>` to `<X/>`), or a fallback reduced to its left
 side (`a || b` to `a`). Imports, types, comments, `private` and declarations are not units: their users
 carry the proof.

@@ -908,6 +908,7 @@ class ProveTest(unittest.TestCase):
         self.enterContext(mock.patch.object(gate, "GATE_LOCK_FILE", self.directory / "lock"))
         self.enterContext(mock.patch.object(gate, "notify", lambda *arguments: None))
         self.enterContext(mock.patch.object(gate, "run_declared_proofs", lambda *arguments: gate.STATUS_PASS))
+        self.enterContext(mock.patch.object(gate, "UNIT_STAGE_IN_PROOF", True))
 
     def test_the_proof_is_final_and_the_units_pending_while_the_stage_runs(self):
         seen = {}
@@ -921,6 +922,14 @@ class ProveTest(unittest.TestCase):
         self.assertEqual((seen["status"], seen["units"]["status"]), (gate.STATUS_PASS, gate.STATUS_PENDING))
         self.assertEqual(findings["status"], gate.STATUS_PASS)
         self.assertLess(findings["finished_at"], findings["units"]["finished_at"])
+
+    def test_the_unit_stage_stays_out_of_the_proof_until_it_is_switched_on(self):
+        stage = mock.Mock()
+        with mock.patch.object(gate, "UNIT_STAGE_IN_PROOF", False), mock.patch.object(gate, "unit_stage", stage):
+            gate.prove(self.run_directory)
+        stage.assert_not_called()
+        findings = gate.read_json(self.run_directory / gate.FINDINGS_FILE_NAME)
+        self.assertEqual((findings["status"], findings["units"]["status"]), (gate.STATUS_PASS, gate.STATUS_NOT_APPLICABLE))
 
     def test_the_waive_window_opens_when_the_unit_stage_finished(self):
         survivor = {"digest": "d1", "status": gate.UNIT_SURVIVED}
@@ -978,6 +987,16 @@ class UnitStageTest(unittest.TestCase):
             cache.write_text(json.dumps({"k1": [], "k2": {"at": "2999-01-01T00:00:00Z", "status": "killed"}}))
             with mock.patch.object(gate, "UNIT_CACHE_FILE", cache):
                 self.assertEqual(list(gate.read_unit_cache()), ["k2"])
+
+    @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
+    def test_code_inside_a_string_interpolation_is_not_a_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "log.rb"
+            path.write_text("def warn_it(e)\n  logger.warn(\"unavailable: #{e.class}\")\nend\n")
+            request = json.dumps({"files": [{"path": str(path), "added_lines": [2]}]})
+            done = subprocess.run(["ruby", str(gate.RUBY_UNIT_FINDER)], input=request, capture_output=True, text=True)
+            self.assertEqual([unit["original"] for unit in json.loads(done.stdout)["units"]],
+                             ['logger.warn("unavailable: #{e.class}")'])
 
     @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
     def test_a_heredoc_statement_is_not_a_unit_and_units_carry_their_scope(self):

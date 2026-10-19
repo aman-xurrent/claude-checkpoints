@@ -469,6 +469,10 @@ STATUS_SEVERITY = (
 # those by hand ("Deleting it leaves 317 examples green", PR 1111). It reports until it has been
 # measured on real branches; only then does a survivor refuse the push.
 UNIT_REFUSAL_ENABLED = False
+# Measured on PR 1111: 705 units, a 13.5 minute baseline over 40 spec files, then about 50 seconds a unit, so
+# about ten hours under the gate lock that every proof waits for. Until the owner decides where the stage
+# belongs, it runs only on request, with `gate.py units --measure`.
+UNIT_STAGE_IN_PROOF = False
 UNITS_DIRECTORY = Path(__file__).resolve().parent / "units"
 RUBY_UNIT_FINDER = UNITS_DIRECTORY / "ruby_units.rb"
 SCRIPT_UNIT_FINDER = UNITS_DIRECTORY / "ts_units.js"
@@ -1448,9 +1452,10 @@ def prove(run_directory):
             proof_status, findings["reason"] = STATUS_ERROR, str(error)[:ERROR_REASON_MAX_CHARACTERS]
         if not UNIT_REFUSAL_ENABLED:
             settle(findings, proof_status, findings_path, log)
-        if proof_status == STATUS_ERROR:
-            findings["units"] = {"status": STATUS_NOT_APPLICABLE, "units": [], "reason": "the proofs did not finish",
-                                 "finished_at": now_iso()}
+        if proof_status == STATUS_ERROR or not UNIT_STAGE_IN_PROOF:
+            reason = ("the proofs did not finish" if proof_status == STATUS_ERROR
+                      else "the unit stage runs only with `gate.py units --measure` for now")
+            findings["units"] = {"status": STATUS_NOT_APPLICABLE, "units": [], "reason": reason, "finished_at": now_iso()}
         else:
             findings["units"] = {"status": STATUS_PENDING}
             write_json(findings_path, findings)
