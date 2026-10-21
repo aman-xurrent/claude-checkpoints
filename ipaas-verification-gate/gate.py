@@ -214,6 +214,7 @@ PROOF_DIRECTORY = Path(".claude/proof")
 DEVIATIONS_PATH = Path(".claude/deviations")
 BASE_CACHE_NAME = "base.json"
 FIGMA_MISMATCH_FILE_NAME = "figma-compare.json"
+LEGACY_MISMATCH_KEY = "first_mismatch_at"
 COMMENTS_PATH = Path(".claude/comments")
 COMMENT_FIX = "fix-in-this-pr"
 COMMENT_SEPARATE = "separate-request"
@@ -234,6 +235,7 @@ PATCH_FILE_NAME = "patch.diff"
 META_FILE_NAME = "meta.json"
 FINDINGS_FILE_NAME = "findings.json"
 UNITS_FILE_NAME = "units.json"
+PROOF_NOT_JUDGED_AT = f"the run's {FINDINGS_FILE_NAME} under units.not_judged"
 MEASURE_NOT_JUDGED_AT = f"{UNITS_FILE_NAME} under not_judged"
 LOG_FILE_NAME = "prover.log"
 REFERENCES_DIRECTORY_NAME = "references"
@@ -342,8 +344,9 @@ ECHO_LINE = re.compile(r"^\s*(?:their words:|Evidence:)|Reason on record:|one-sh
 # A soft start after a piece that says no anywhere is no start: "Do not under any circumstances: merge it".
 NEGATION = re.compile(r"\b(?:not|never|no|nope|nah|cannot|dont|cant|wont|shouldnt|didnt|doesnt|isnt|arent|"
                       r"wasnt|werent|wouldnt|couldnt|havent|hasnt|hadnt|aint)\b|\w*n't\b")
-# What comparison ignores at either end of the evidence does not count toward its length: spaces, quotes,
-# backticks and closing punctuation. "yes.........." is three characters.
+# The characters at either end of the evidence that do not count toward its minimum length: spaces, quotes and
+# the marks . ! ? : ; , -. "yes.........." is three characters. The length check is stricter than comparison,
+# which keeps "yes,,,,,,,,,," whole. A backtick never counts, because SMART_QUOTES removes it.
 EVIDENCE_PADDING = " \"'.!?:;,-"
 GRANDFATHERED_DECISIONS_FILE = SKIPS_LOG.parent / "grandfathered-decisions.json"
 DECISION_DIGEST_LENGTH = 16
@@ -393,10 +396,15 @@ PICK_MARKER = "CHERRY_PICK_HEAD"
 CONFLICT_REPLAY_MARKER = "REBASE_HEAD"
 EDIT_STOP_MARKER = f"{MERGE_DIRECTORY}/amend"
 MERGE_MARKER = "MERGE_HEAD"
+MERGE_MESSAGE_FILE = "MERGE_MSG"
+SQUASH_MESSAGE_FILE = "SQUASH_MSG"
 REBASE_REFLOG_ACTION = "rebase"
+# The names whose presence says git replays, picks or merges a commit. The edit stop's amend file is not one:
+# it says the user makes the commit, so replay_paths reads it beside these.
+REPLAY_MARKERS = (*REBASE_DIRECTORIES, PICK_MARKER, CONFLICT_REPLAY_MARKER, MERGE_MARKER)
 # Writing one of these by hand makes the commit hook read a new commit as git's replay or merge, which keeps the
 # phase the message claims.
-GIT_REPLAY_STATE = (*REBASE_DIRECTORIES, PICK_MARKER, CONFLICT_REPLAY_MARKER, MERGE_MARKER, "MERGE_MSG", "SQUASH_MSG")
+GIT_REPLAY_STATE = (*REPLAY_MARKERS, MERGE_MESSAGE_FILE, SQUASH_MESSAGE_FILE)
 # `tmux send-keys` types into a session window, and what it types arrives as the owner's prompt.
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP",
                             "send-pack", "GIT_DIR=", "phased pause", "phased resume", "settings.local.json",
@@ -704,12 +712,16 @@ def read_json(path, default=None):
 
 
 def write_json(path, payload, mode=None):
+    write_atomically(path, json.dumps(payload, indent=2) + "\n", mode)
+
+
+def write_atomically(path, text, mode=None):
     """Written beside the target and renamed over it, so a reader or a killed writer never leaves half a file.
     `mode` keeps a record that quotes the owner readable by the owner only."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(f".{path.name}.{os.getpid()}.partial")
-    partial.write_text(json.dumps(payload, indent=2) + "\n")
+    partial.write_text(text)
     if mode is not None:
         partial.chmod(mode)
     os.replace(partial, path)
@@ -947,9 +959,14 @@ def commit_delta(root, sha, base_ref=None, base_sha=None):
     return git_diff(root, *snapshot_diff_arguments(ZERO_CONTEXT), base, sha, "--", ".", *gate_state_exclusions()).stdout
 
 
-def commit_change_identity(root, sha, base_ref=None, base_sha=None):
+def measured_delta(root, sha, base_ref, base_sha, measure):
+    """`measure` applied to the branch delta at one commit, or None when no base can be found."""
     delta = commit_delta(root, sha, base_ref, base_sha)
-    return None if delta is None else patch_identity(delta)
+    return None if delta is None else measure(delta)
+
+
+def commit_change_identity(root, sha, base_ref=None, base_sha=None):
+    return measured_delta(root, sha, base_ref, base_sha, patch_identity)
 
 
 def evidence_is_fresh(root, record):
@@ -2105,8 +2122,8 @@ def judged_record(unit, run):
 
 
 def unjudged_record(unit, baseline):
-    """A unit no green spec file ran: unmeasured when a red file ran it or the budget left files unrun, and
-    unexecuted only when every candidate ran and none touched it."""
+    """A unit no green spec file ran: unmeasured when a red file ran it, the budget left files unrun or a
+    candidate spec file failed to load, and unexecuted only when every candidate ran and none touched it."""
     red = covering_specs(unit, baseline["red"])
     if red:
         listed = ", ".join(red[:LISTED_EVIDENCE_LIMIT])
@@ -2114,7 +2131,7 @@ def unjudged_record(unit, baseline):
                            [f"only spec files red with the change applied ran it: {listed}"])
     if baseline["unrun"]:
         return unit_record(unit, [], UNIT_UNMEASURED, ["the time budget ran out before every candidate spec file ran"])
-    if baseline.get("unloaded"):
+    if baseline["unloaded"]:
         listed = ", ".join(baseline["unloaded"][:LISTED_EVIDENCE_LIMIT])
         return unit_record(unit, [], UNIT_UNMEASURED,
                            [f"a candidate spec file failed to load, so what it would run is unknown: {listed}"])
@@ -2197,7 +2214,7 @@ def unit_summary(records, baseline, candidates, not_judged, runner_errors, start
     return {"status": unit_stage_status(records, runner_errors), "units": records,
             "counts": {each: counts.get(each, 0) for each in UNIT_STATUSES},
             "red_on_green": sorted(baseline["red"]), "runner_errors": sorted(set(runner_errors)),
-            "unrun": baseline["unrun"], "unloaded": baseline.get("unloaded", []), "not_judged": not_judged,
+            "unrun": baseline["unrun"], "unloaded": baseline["unloaded"], "not_judged": not_judged,
             "spec_files": sum(len(each) for each in candidates.values()),
             "seconds": round(time.time() - started), "refusal_enabled": UNIT_REFUSAL_ENABLED}
 
@@ -2254,7 +2271,7 @@ def unit_reason(unit):
     return "; ".join(unit.get("evidence") or []) or "no spec runs it"
 
 
-def unit_report_lines(units, listed_in=f"the run's {FINDINGS_FILE_NAME} under units.not_judged"):
+def unit_report_lines(units, listed_in):
     if not units:
         return ["units: not run"]
     if not units.get("units"):
@@ -2274,9 +2291,12 @@ def unit_report_lines(units, listed_in=f"the run's {FINDINGS_FILE_NAME} under un
              ("red_on_green", "not green with the change applied, so they judged nothing: {}"),
              ("unrun", "the time budget ran out before these spec files ran: {}"),
              ("unloaded", "these spec files failed to load, so the units they would run are unmeasured: {}"))
+    listed = {key: units.get(key) or [] for key, _text in notes}
+    # A spec file that failed to load is red too. It is named once, under the note that says why.
+    listed["red_on_green"] = [spec for spec in listed["red_on_green"] if spec not in listed["unloaded"]]
     for key, text in notes:
-        if units.get(key):
-            lines.append("  " + text.format(", ".join(units[key][:LISTED_FILES_LIMIT])))
+        if listed[key]:
+            lines.append("  " + text.format(", ".join(listed[key][:LISTED_FILES_LIMIT])))
     if units.get("not_judged"):
         lines.append(f"  {len(units['not_judged'])} changed line(s) or file(s) produced no unit and were not judged; "
                      f"they are listed in {listed_in}")
@@ -2290,7 +2310,7 @@ def units_command(arguments):
     if "--measure" not in arguments:
         run_directory = latest_run(root)
         findings = read_json(run_directory / FINDINGS_FILE_NAME) if run_directory else None
-        print("\n".join(unit_report_lines((findings or {}).get("units"))))
+        print("\n".join(unit_report_lines((findings or {}).get("units"), PROOF_NOT_JUDGED_AT)))
         return
     # The measure holds the gate lock every proof waits for, so it stops at a budget unless asked for no limit.
     budget_text = argument_value(arguments, "--budget", str(UNIT_STAGE_BUDGET_SECONDS))
@@ -2307,7 +2327,7 @@ def units_command(arguments):
         result = unit_stage(spec_patch, code_patch, base_sha, paths, directory, log, root, budget=budget or None)
     report_path = directory / UNITS_FILE_NAME
     write_json(report_path, result)
-    print("\n".join(unit_report_lines(result, listed_in=MEASURE_NOT_JUDGED_AT)))
+    print("\n".join(unit_report_lines(result, MEASURE_NOT_JUDGED_AT)))
     print(f"report: {report_path}")
     print("A survivor found by --measure cannot be waived; only a declared proof's report can be.")
 
@@ -2519,7 +2539,7 @@ def head_phase(root):
 
 def replay_paths(root):
     """Which of the names git leaves while it merges, replays or picks a commit are present now."""
-    names = (*REBASE_DIRECTORIES, PICK_MARKER, CONFLICT_REPLAY_MARKER, EDIT_STOP_MARKER, MERGE_MARKER)
+    names = (*REPLAY_MARKERS, EDIT_STOP_MARKER)
     locations = git(root, "rev-parse", *[part for name in names for part in ("--git-path", name)]).stdout.splitlines()
     return {name for name, location in zip(names, locations) if (root / location).exists()}
 
@@ -2814,20 +2834,25 @@ def read_json_lines(path):
 def split_sentences(text):
     """A text as its sentences, each with whether it may start a quote. Case, accents written two ways, curly
     quotes, backticks, spacing, wrapping quotes and a closing full stop do not change what someone said; a closing
-    question mark does. A soft start (a line break, a colon, a dash, a list marker) that follows a negation is no
-    start: "Do not: waive this unit." and "Please do not" then "waive this unit" on the next line say no."""
+    question mark does. A soft start (a line break, a colon or a semicolon, a dash, a list marker) after a negation
+    is no start: "Do not: waive this unit." and "Please do not" then "waive this unit" on the next line say no."""
     def compute():
-        parts = SENTENCE_BREAK.split("\n" + unicodedata.normalize("NFC", text or "").translate(SMART_QUOTES).casefold())
+        parts = SENTENCE_BREAK.split("\n" + normalized(text).casefold())
         pieces, previous_raw = [], ""
         for raw in parts:
             piece = re.sub(r"\s+", " ", raw).strip().strip("\"'").strip().rstrip(".!").strip()
             if piece:
                 soft = not previous_raw.rstrip().endswith((".", "!", "?"))
-                may_start = not pieces or not soft or not NEGATION.search(pieces[-1][0])
-                pieces.append((piece, may_start))
+                blocked = bool(pieces and soft and NEGATION.search(pieces[-1][0]))
+                pieces.append((piece, not blocked))
                 previous_raw = raw
         return tuple(pieces)
     return memoized(("sentences", text), compute)
+
+
+def normalized(text):
+    """Accents written two ways read as one, curly quotes read as straight ones, and backticks are gone."""
+    return unicodedata.normalize("NFC", text or "").translate(SMART_QUOTES)
 
 
 def comparable(text):
@@ -2889,9 +2914,9 @@ def owner_said(evidence, root, after=None, before=None):
 
 
 def evidence_length(evidence):
-    """The evidence's length without the padding comparison ignores at its ends, so "yes.........." and
-    "``````````yes" are three characters, while the dash inside "c2 - get in A" still counts."""
-    text = re.sub(r"\s+", " ", unicodedata.normalize("NFC", evidence or "").translate(SMART_QUOTES))
+    """The evidence's length without the padding at its ends or a leading list marker, so "yes..........",
+    "``````````yes" and "1. yes" are three characters, while the dash inside "c2 - get in A" still counts."""
+    text = re.sub(r"\s+", " ", normalized(evidence))
     text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", text.strip(EVIDENCE_PADDING))
     return len(text.strip(EVIDENCE_PADDING))
 
@@ -3104,10 +3129,9 @@ def stale_paths(root, meta, revisions, proven):
 
 
 def commit_path_identities(root, sha, base_ref, base_sha):
-    def compute():
-        delta = commit_delta(root, sha, base_ref, base_sha)
-        return None if delta is None else path_identities(delta)
-    return memoized(("commit_path_identities", str(root), sha, base_ref, base_sha), compute)
+    """Kept for the process, because pre-push asks it once for every file a proof saw."""
+    return memoized(("commit_path_identities", str(root), sha, base_ref, base_sha),
+                    lambda: measured_delta(root, sha, base_ref, base_sha, path_identities))
 
 
 def commit_paths(root, sha):
@@ -3985,9 +4009,10 @@ def design_key(design, design_path):
 def record_mismatch(root, key, differs):
     """When figma-compare first reported the difference a deliberate one answers, per design frame. A compare of
     that frame that matches ends its window, so words typed before an earlier, fixed difference cannot answer a
-    new one; a match on another frame leaves this one's window alone."""
+    new one; a match on another frame leaves this one's window alone. A file written before windows were kept per
+    frame holds one `first_mismatch_at` for every design, and the first compare after it starts the file again."""
     windows = mismatch_windows(root)
-    if "first_mismatch_at" in windows:
+    if LEGACY_MISMATCH_KEY in windows:
         windows = {}
     if not differs:
         windows.pop(key, None)
@@ -3998,13 +4023,14 @@ def record_mismatch(root, key, differs):
 
 def latest_mismatch_at(root):
     """The newest window still open in this worktree. A deviation does not say which design it answers, so the
-    owner's words must come after every difference still open: words about the list cannot answer the detail."""
+    owner's words must come after every difference still open: words about the list cannot answer the detail.
+    A file from before windows were kept per frame counts as one window, open for every design."""
     windows = mismatch_windows(root)
     return max(windows.values()) if windows else None
 
 
 def mismatch_windows(root):
-    """One window per design frame. A file written before that held one `first_mismatch_at` for every design."""
+    """One window per design frame, keyed by design_key, as figma-compare last wrote them."""
     windows = read_json(figma_mismatch_path(root), default={})
     return windows if isinstance(windows, dict) else {}
 

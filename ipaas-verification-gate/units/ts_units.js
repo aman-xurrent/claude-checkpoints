@@ -23,6 +23,7 @@ const SCOPES = new Set([
   KINDS.FunctionDeclaration, KINDS.MethodDeclaration, KINDS.ClassDeclaration, KINDS.ArrowFunction,
   KINDS.FunctionExpression, KINDS.GetAccessor, KINDS.SetAccessor, KINDS.Constructor,
 ]);
+const ACCESSOR_PREFIXES = { [KINDS.GetAccessor]: "get ", [KINDS.SetAccessor]: "set " };
 
 function scriptKind(path) {
   if (path.endsWith(".tsx")) return ts.ScriptKind.TSX;
@@ -97,17 +98,16 @@ function candidatesAt(node, source) {
   return found;
 }
 
-// The function or class a unit sits in, `Tile#onClick`, so two identical units in two functions are two units.
 // A constructor has no name node, and a getter and a setter share one, so each says what it is.
 function scopeName(holder, source) {
   if (holder.kind === KINDS.Constructor) return "constructor";
   const declared = holder.parent && holder.parent.kind === KINDS.VariableDeclaration && holder.parent.name;
   const named = holder.name || declared;
   if (!named) return null;
-  const prefix = { [KINDS.GetAccessor]: "get ", [KINDS.SetAccessor]: "set " }[holder.kind] || "";
-  return prefix + named.getText(source);
+  return (ACCESSOR_PREFIXES[holder.kind] || "") + named.getText(source);
 }
 
+// The function or class a unit sits in, `Tile#onClick`, so two identical units in two functions are two units.
 function scopeOf(node, source) {
   const names = [];
   for (let holder = node.parent; holder; holder = holder.parent) {

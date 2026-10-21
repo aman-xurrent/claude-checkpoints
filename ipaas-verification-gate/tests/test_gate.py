@@ -273,9 +273,9 @@ class CommitHookTest(ScratchRepository):
         message.write_text("picked\n\n[skip ci]\n\nPhase: 2\n")
         self.set_phase(7)
         git_path(self.root, "CHERRY_PICK_HEAD").write_text("x\n")
-        sh(self.root, sys.executable, str(GATE_FILE), "commit-msg", str(message), "merge")
-        self.assertIn("Phase: 7", message.read_text())
-        self.assertNotIn("[skip ci]", message.read_text())
+        picked = self.run_hook(message, "merge")
+        self.assertIn("Phase: 7", picked)
+        self.assertNotIn("[skip ci]", picked)
 
     def test_a_failing_references_scan_does_not_refuse_the_commit(self):
         self.write("app/a.rb", "one\ntwelve\nthree\n")
@@ -794,6 +794,12 @@ class OwnerWordsTest(ScratchRepository):
         self.assertFalse(self.said("waive the overlay unit"))
         self.assertFalse(self.said("merge the icon change"))
 
+    def test_a_negative_line_quoted_with_the_next_one_counts(self):
+        self.say("I have no objection:\nwaive the overlay unit, it is styling")
+        self.assertFalse(self.said("waive the overlay unit, it is styling"))
+        self.assertTrue(self.said("I have no objection:\nwaive the overlay unit, it is styling"))
+        self.assertTrue(self.said("I have no objection: waive the overlay unit, it is styling"))
+
     def test_the_minimum_length_is_the_owners_own_text(self):
         self.say("c2 - get in A")
         self.say("yes")
@@ -932,7 +938,7 @@ class GuardTest(unittest.TestCase):
                         "tmux send-keys -t 1 'yes, waive it' Enter"):
             self.assertTrue(self.denied(command, cwd="/work/wt"), command)
 
-    def test_the_fourth_review_shapes_are_refused(self):
+    def test_writes_and_hook_calls_hidden_in_heredocs_substitutions_or_nested_shells_are_refused(self):
         findings, surface = ".claude/proof/runs/X/findings.json", "python3 ~/personal/scripts/gate/gate.py surface"
         for command in (f'echo "<<EOF"\nrm -rf .claude/proof/runs/X', f"cat notes.txt # <<EOF\n{surface}",
                         f"echo $((1<<2))\nrm -rf .claude/proof/runs/X", f'cat <<< "x"\nrm -rf .claude/proof/runs/X',
@@ -976,7 +982,7 @@ class GuardTest(unittest.TestCase):
                         "mkdir -p .claude/proof && printf 1 > .claude/proof/phase"):
             self.assertFalse(self.denied(command, cwd="/work/wt"), command)
 
-    def test_the_fifth_review_shapes_are_refused(self):
+    def test_redirects_quoting_wrappers_and_combined_flags_cannot_hide_a_write(self):
         findings = ".claude/proof/runs/X/findings.json"
         for command in ("python3 2>/dev/null ~/personal/scripts/gate/gate.py surface",
                         ">/dev/null rm -rf .claude/proof/runs/X",
@@ -1016,7 +1022,7 @@ class GuardTest(unittest.TestCase):
         for command in ("find .claude/proof/runs -name '*.json' -exec cat {} +", "find .claude/proof/runs -type f"):
             self.assertFalse(self.denied(command, cwd="/work/wt"), command)
 
-    def test_the_fifth_review_false_refusals_are_allowed(self):
+    def test_ordinary_writes_near_the_gate_and_reads_that_name_its_state_are_allowed(self):
         for command in ("cp notes.md ~/.claude", "cp notes.md ~/personal", "rm docs/rebase-merge-notes.md",
                         "ruby -rtime -e 'puts 1'", "perl -Mstrict -e 'print 1'", "echo $((1<<2))",
                         "echo 'read the GIT_REFLOG_ACTION docs'", "rg 'printf.*GIT_REFLOG_ACTION' gate.py",
@@ -1024,9 +1030,9 @@ class GuardTest(unittest.TestCase):
             self.assertFalse(self.denied(command, cwd="/work/wt"), command)
 
     def test_a_guard_that_crashes_refuses(self):
-        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+        payload = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
         with mock.patch.object(gate, "guard_bash", side_effect=RecursionError), \
-                mock.patch.object(gate, "read_json_stdin", lambda: json.loads(payload)), \
+                mock.patch.object(gate, "read_json_stdin", lambda: payload), \
                 contextlib.redirect_stdout(io.StringIO()) as printed:
             gate.guard()
         self.assertIn('"permissionDecision": "deny"', printed.getvalue())
@@ -1066,6 +1072,8 @@ class GrandfatherScriptTest(unittest.TestCase):
         self.assertEqual(self.run_script(home, repository).returncode, 0, "the first run takes the list")
         listing = home / ".local/state/gate/grandfathered-decisions.json"
         self.assertTrue(listing.exists())
+        epoch = home / ".local/state/gate/owner-words-epoch"
+        self.assertEqual(epoch.stat().st_mode & 0o777, gate.PRIVATE_FILE_MODE, "the epoch is the owner's only")
         self.assertEqual(self.run_script(home, repository).returncode, 0, "a second run keeps the list")
         listing.unlink()
         refused = self.run_script(home, repository)
@@ -1217,7 +1225,7 @@ class UnitBookkeepingTest(unittest.TestCase):
             self.assertIsNone(gate.gate_relative("/work/gate2/platform/a.rb"))
 
     def test_a_runner_that_wrote_no_report_makes_the_stage_an_error(self):
-        baseline = {"red": {}, "unrun": []}
+        baseline = {"red": {}, "unrun": [], "unloaded": []}
         summary = gate.unit_summary([], baseline, {}, [], ["platform/spec/a_spec.rb"], 0)
         self.assertEqual(summary["status"], gate.STATUS_ERROR)
         self.assertEqual(gate.unit_summary([], baseline, {}, [], [], 0)["status"], gate.STATUS_PASS)
@@ -1228,30 +1236,43 @@ class UnitBookkeepingTest(unittest.TestCase):
         self.assertEqual(gate.unit_stage_status(unmeasured + [{"status": gate.UNIT_KILLED}], []), gate.STATUS_PASS)
         self.assertEqual(gate.unit_stage_status([{"status": gate.UNIT_WAIVED}], []), gate.STATUS_PASS)
 
-    def test_the_report_names_the_file_that_lists_the_lines_not_judged(self):
-        units = {"status": gate.STATUS_PASS, "units": [{"status": gate.UNIT_KILLED}], "counts": {}, "seconds": 1,
-                 "spec_files": 1, "not_judged": [{"path": "platform/app/views/x.erb"}]}
-        self.assertIn("findings.json under units.not_judged", gate.unit_report_lines(units)[-1])
+    def measure_with(self, unit_stage):
+        """A scratch directory for `units --measure`, with the repository, the snapshot and the lock stubbed."""
         directory = tempfile.mkdtemp(prefix="gate-measure-")
         self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         replacements = {"require_repository": lambda command: Path(directory), "diff_base": lambda root: "abc",
                         "snapshot_patch": lambda root, base: "", "gate_lock": lambda log: contextlib.nullcontext(),
-                        "unit_stage": lambda *arguments, **options: units}
+                        "unit_stage": unit_stage}
         for name, value in replacements.items():
             self.enterContext(mock.patch.object(gate, name, value))
+        return directory
+
+    def test_the_report_names_the_file_that_lists_the_lines_not_judged(self):
+        units = {"status": gate.STATUS_PASS, "units": [{"status": gate.UNIT_KILLED}], "counts": {}, "seconds": 1,
+                 "spec_files": 1, "not_judged": [{"path": "platform/app/views/x.erb"}]}
+        directory = self.measure_with(lambda *arguments, **options: units)
+        run_directory = Path(directory) / "run"
+        gate.write_json(run_directory / gate.FINDINGS_FILE_NAME, {"units": units})
+        with mock.patch.object(gate, "latest_run", lambda root: run_directory), \
+                contextlib.redirect_stdout(io.StringIO()) as printed:
+            gate.units_command([])
+        self.assertIn("listed in the run's findings.json under units.not_judged", printed.getvalue())
         with contextlib.redirect_stdout(io.StringIO()) as printed:
             gate.units_command(["--measure", "--out", directory])
         self.assertIn("listed in units.json under not_judged", printed.getvalue())
 
+    def test_a_spec_file_that_failed_to_load_is_named_once_in_the_report(self):
+        spec = "platform/spec/a_spec.rb"
+        units = {"status": gate.STATUS_UNMEASURED, "units": [{"status": gate.UNIT_KILLED}], "counts": {},
+                 "seconds": 1, "spec_files": 1, "red_on_green": [spec, "platform/spec/b_spec.rb"], "unloaded": [spec]}
+        report = "\n".join(gate.unit_report_lines(units, gate.PROOF_NOT_JUDGED_AT))
+        self.assertEqual(report.count(spec), 1, report)
+        self.assertIn(f"failed to load, so the units they would run are unmeasured: {spec}", report)
+        self.assertIn("judged nothing: platform/spec/b_spec.rb", report)
+
     def test_the_measure_budget_defaults_and_zero_means_no_limit(self):
-        directory = tempfile.mkdtemp(prefix="gate-measure-")
-        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
         budgets = []
-        replacements = {"require_repository": lambda command: Path(directory), "diff_base": lambda root: "abc",
-                        "snapshot_patch": lambda root, base: "", "gate_lock": lambda log: contextlib.nullcontext(),
-                        "unit_stage": lambda *arguments, budget=None, **options: budgets.append(budget) or {}}
-        for name, value in replacements.items():
-            self.enterContext(mock.patch.object(gate, name, value))
+        directory = self.measure_with(lambda *arguments, budget=None, **options: budgets.append(budget) or {})
         with contextlib.redirect_stdout(io.StringIO()):
             gate.units_command(["--measure", "--out", directory])
             gate.units_command(["--measure", "--out", directory, "--budget", "0"])
@@ -1388,6 +1409,34 @@ class DesignWindowTest(unittest.TestCase):
         design = {"frame": {"id": "721:23920", "w": 1440, "h": 900}}
         self.assertEqual(gate.design_key(design, "/tmp/a/design.json"), gate.design_key(design, "/tmp/b/copy.json"))
         self.assertNotEqual(gate.design_key({}, "/tmp/a/design.json"), gate.design_key({}, "/tmp/b/copy.json"))
+
+    def test_a_compare_that_matches_at_another_path_closes_the_window_of_the_same_frame(self):
+        directory = Path(tempfile.mkdtemp(prefix="gate-figma-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        self.addCleanup(gate.PROCESS_MEMO.clear)
+        root = directory / "repo"
+        root.mkdir()
+        init_repository(root)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(root)
+        title = {"text": "Runbooks", "x": 10, "y": 20, "w": 80, "h": 16}
+        design = {"frame": {"id": "721:23920", "w": 1440, "h": 900}, "texts": [title]}
+        files = {"first/design.json": design, "second/copy.json": design,
+                 "moved.json": {"texts": [{**title, "y": 40}]}, "built.json": {"texts": [title]}}
+        for name, payload in files.items():
+            gate.write_json(directory / name, payload)
+
+        def compare(design_name, built_name):
+            arguments = ["--design", str(directory / design_name), "--built", str(directory / built_name),
+                         "--tolerance", "2"]
+            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exited:
+                gate.figma_compare(arguments)
+            return exited.exception.code
+
+        self.assertEqual(compare("first/design.json", "moved.json"), 1)
+        self.assertIsNotNone(gate.latest_mismatch_at(root), "the moved title opens the frame's window")
+        self.assertEqual(compare("second/copy.json", "built.json"), 0)
+        self.assertIsNone(gate.latest_mismatch_at(root), "the same frame at another path closes it")
 
 
 class ProveTest(unittest.TestCase):

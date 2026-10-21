@@ -40,9 +40,7 @@ elif gate.OWNER_WORDS_EPOCH_FILE.exists():
              "one, which makes every decision recorded before now quote the owner again.")
 else:
     epoch = gate.now_iso()
-    gate.OWNER_WORDS_EPOCH_FILE.parent.mkdir(parents=True, exist_ok=True)
-    gate.OWNER_WORDS_EPOCH_FILE.write_text(epoch + "\n")
-    os.chmod(gate.OWNER_WORDS_EPOCH_FILE, gate.PRIVATE_FILE_MODE)
+    gate.write_atomically(gate.OWNER_WORDS_EPOCH_FILE, epoch + "\n", mode=gate.PRIVATE_FILE_MODE)
     digests = sorted({gate.decision_digest(record) for record in records if gate.recorded_before(record, epoch)})
     gate.write_json(gate.GRANDFATHERED_DECISIONS_FILE, digests, mode=gate.PRIVATE_FILE_MODE)
     print(f"epoch {epoch}: {len(digests)} earlier decision(s) listed")

@@ -67,12 +67,12 @@ proof run reported through, on the user's whole sentences typed after that repor
 request, no proof run reports a unit, so there is nothing to waive.
 
 `pre-push` refuses a Claude commit that touches code without a fresh, passing `Proof-Id` trailer, and it
-judges the newest proof again: each file it proved is read at the newest Claude commit, from the proven one up,
-that touched it, so a rebase or an amend that changed a file under a proof makes it stale, and the owner's
-own commits are not the proof's business. A clean rebase keeps a proof fresh, because freshness compares the changed lines,
-not the raw diff. Every changed file except documentation counts, YAML and stylesheets included. A file
-that sat untracked in the worktree while the proof ran and is never committed does not count, unless it
-is code, a spec or a fixture.
+judges the newest proof again: each file it proved is read at the newest Claude commit that touched it,
+counting only the proven commit and the ones after it. So a rebase or an amend that changed a file under a
+proof makes it stale, and the owner's own commits are not the proof's business. A clean rebase keeps a proof
+fresh, because freshness compares the changed lines, not the raw diff. Every changed file except
+documentation counts, YAML and stylesheets included. A file that sat untracked in the worktree while the
+proof ran and is never committed does not count, unless it is code, a spec or a fixture.
 There is no skip for you. No environment variable, no `--no-verify`, no hook path change, no edit to the
 gate: those commands are denied to your Bash tool. Only the user can let one push through, from their own
 shell, with `! python3 ~/personal/scripts/gate/gate.py skip-once "<reason>"`. When the gate refuses, fix
@@ -352,9 +352,13 @@ gate checks the quote against the user's stored prompts and answers, typed in th
 reviewer's latest comment on that thread, and refuses one it cannot find. The record keeps which way it
 came, `chat` or `marks`.
 
-A sentence the user wrote after a line that says no (`not`, `never`, `no`, `dont`, `cant`, `shouldnt`, an
-`n't` word) does not count on its own, because the no may carry across the line break. Quote the whole
-thought, the negative line and the sentence together, or ask the user to restate it as one line.
+A sentence that starts at a soft break does not count on its own when the piece just before it says no. A
+soft break is a line break, a colon or a semicolon, a dash between spaces, or a list marker. It is soft only
+when the piece before it does not end with `.`, `!` or `?`. A piece says no when it holds `not`, `never`,
+`no`, `nope`, `nah`, `cannot` or an `n't` word anywhere, also without the apostrophe (`dont`, `cant`, `wont`).
+The no may carry across the break, so the gate does not judge what the no is about. After "I have no
+objection:" the line "waive the overlay unit" counts only when you quote the two together. Quote the
+negative piece and the sentence together, or ask the user to restate it as one sentence.
 
 If their message does not say which comment it answers, ask which one. Never guess: a decision
 recorded against the wrong comment is worse than no decision, because nothing later shows it went
