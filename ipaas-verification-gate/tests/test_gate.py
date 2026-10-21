@@ -185,6 +185,58 @@ class CommitHookTest(ScratchRepository):
         sh(self.root, "git", "add", "-A")
         self.assertNotIn("Phase:", self.run_hook(message, "commit", "HEAD"), "an amend that adds code claims none")
 
+    def test_an_amend_with_dash_m_and_during_a_phase_keeps_only_heads_phase(self):
+        self.write("app/a.rb", "one\nfifteen\nthree\n")
+        self.commit(f"work\n\n{CLAUDE_TRAILER}")
+        message = self.directory / "amended"
+        # `git commit --amend -m` reports the source `message`, not `commit`.
+        message.write_text(f"work\n\n[skip ci]\n\nPhase: 3\n{CLAUDE_TRAILER}\n")
+        self.assertNotIn("Phase:", self.run_hook(message, "message"), "a -m amend of code drops a typed phase")
+        self.set_phase(5)
+        self.write("app/a.rb", "one\nsixteen\nthree\n")
+        self.commit(f"phase five\n\n{CLAUDE_TRAILER}")
+        self.set_phase(7)
+        message.write_text(f"phase five, reworded\n\nPhase: 7\n{CLAUDE_TRAILER}\n")
+        kept = self.run_hook(message, "commit", "HEAD")
+        self.assertIn("Phase: 5", kept, "a message-only amend keeps HEAD's phase, not the active one")
+        self.assertNotIn("Phase: 7", kept)
+
+    def test_a_reword_keeps_only_the_phase_the_commit_carried(self):
+        self.set_phase(2)
+        self.write("app/a.rb", "one\nseventeen\nthree\n")
+        self.commit(f"phase two\n\n{CLAUDE_TRAILER}")
+        (self.root / ".claude/proof/phase").unlink()
+        git_path(self.root, "rebase-merge").mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, git_path(self.root, "rebase-merge"), ignore_errors=True)
+        message = self.directory / "reword"
+        message.write_text(f"phase two, reworded\n\n[skip ci]\n\nPhase: 7\n{CLAUDE_TRAILER}\n")
+        with mock.patch.dict(os.environ, {"GIT_REFLOG_ACTION": "rebase (reword)"}):
+            kept = self.run_hook(message, "message")
+        self.assertIn("Phase: 2", kept, "a reword keeps the picked commit's own phase")
+        self.assertNotIn("Phase: 7", kept)
+
+    def test_a_not_computed_verdict_clears_when_a_later_amend_removes_nothing(self):
+        self.write("app/a.rb", "one\neighteen\nthree\n")
+        sh(self.root, "git", "add", "-A")
+        message = self.directory / "message"
+        message.write_text(f"work\n\n{CLAUDE_TRAILER}\n")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.root)
+        stale = {"verdict": gate.VERDICT_NOT_COMPUTED, "base": "old", "change_id": "old"}
+        gate.write_json(gate.references_directory(self.root) / "latest.json", stale)
+        with mock.patch.object(gate, "references_report_for", side_effect=RuntimeError("ast-grep gone")):
+            gate.commit_msg([str(message), "message"])
+        self.assertIn(f"References-Verdict: {gate.VERDICT_NOT_COMPUTED}", message.read_text())
+        with mock.patch.object(gate, "references_report_for", lambda root: {"verdict": gate.STATUS_NOT_APPLICABLE}):
+            gate.commit_msg([str(message), "message"])
+        self.assertNotIn(gate.VERDICT_NOT_COMPUTED, message.read_text(), "a clean rescan clears the stale verdict")
+
+    def test_a_docs_commit_carries_no_proof_or_reference_trailer(self):
+        self.write("docs/notes.md", "a note\n")
+        self.commit(f"docs\n\n{CLAUDE_TRAILER}")
+        self.assertNotIn(gate.PROOF_ID_TRAILER, self.body())
+        self.assertNotIn(gate.REFERENCES_VERDICT_TRAILER, self.body())
+
     def test_only_a_real_merge_keeps_the_message_git_left(self):
         self.set_phase(7)
         self.write("app/a.rb", "one\nfourteen\nthree\n")
@@ -264,6 +316,7 @@ class CommitHookTest(ScratchRepository):
         squashed = f"Squashed commit of the following:\n\n    {CLAUDE_TRAILER}\n"
         self.assertIsNone(gate.CLAUDE_TRAILER_PATTERN.search(squashed))
         self.assertIsNotNone(gate.CLAUDE_TRAILER_PATTERN.search(f"work\n\n {CLAUDE_TRAILER}\n"), "a small indent")
+        self.assertIsNotNone(gate.CLAUDE_TRAILER_PATTERN.search(f"work\n\n\t{CLAUDE_TRAILER}\n"), "a tab indent")
 
 
 class ChangeIdentityTest(ScratchRepository):
@@ -733,11 +786,20 @@ class OwnerWordsTest(ScratchRepository):
         self.assertFalse(self.said("keep the larger padding on the card"))
         self.assertFalse(self.said("waive the button colour unit"))
 
+    def test_a_negation_without_the_apostrophe_still_says_no(self):
+        self.say("you shouldnt\nwaive this unit now")
+        self.say("i cant agree: waive the overlay unit")
+        self.say("we wont do that: merge the icon change")
+        self.assertFalse(self.said("waive this unit now"))
+        self.assertFalse(self.said("waive the overlay unit"))
+        self.assertFalse(self.said("merge the icon change"))
+
     def test_the_minimum_length_is_the_owners_own_text(self):
         self.say("c2 - get in A")
         self.say("yes")
         self.assertTrue(self.said("c2 - get in A"))
-        for padded in ("yes          .", "``````````yes", "yes!!!!!!!!!", "\u201c   yes   \u201d", "yes . . . . . ."):
+        for padded in ("yes          .", "``````````yes", "yes!!!!!!!!!", "\u201c   yes   \u201d", "yes . . . . . .",
+                       "123456789. yes", "1234567890) yes", "- yes", "* yes"):
             self.assertFalse(self.said(padded), padded)
 
     def test_a_question_and_a_cut_at_a_decimal_point_are_refused(self):
@@ -914,6 +976,53 @@ class GuardTest(unittest.TestCase):
                         "mkdir -p .claude/proof && printf 1 > .claude/proof/phase"):
             self.assertFalse(self.denied(command, cwd="/work/wt"), command)
 
+    def test_the_fifth_review_shapes_are_refused(self):
+        findings = ".claude/proof/runs/X/findings.json"
+        for command in ("python3 2>/dev/null ~/personal/scripts/gate/gate.py surface",
+                        ">/dev/null rm -rf .claude/proof/runs/X",
+                        f"cat <<E\"OF\"\nx\nEOF\nrm -rf .claude/proof/runs/X",
+                        f"echo $'\\''; rm -rf .claude/proof/runs/X",
+                        f"echo a\\ #; rm -rf .claude/proof/runs/X",
+                        f"/usr/bin/env rm -rf .claude/proof/runs/X",
+                        f"f() {{ rm -rf .claude/proof/runs/X; }}; f",
+                        f"function f {{ rm -rf .claude/proof/runs/X; }}; f",
+                        f"case x in x) rm -rf .claude/proof/runs/X;; esac",
+                        f"exec -a x rm -rf .claude/proof/runs/X",
+                        f'python3 -Bc "open(\'{findings}\', \'w\').write(1)"',
+                        f"ruby -e 'File.open(\"{findings}\", File::WRONLY) {{ |f| f.puts 1 }}'",
+                        f"perl -e 'unlink \"{findings}\"'",
+                        f"perl -0pi -e 's/a/b/' {findings}",
+                        f"sed -I '' 's/a/b/' {findings}",
+                        "rm -rf .claude/proof/r*",
+                        "awk 'BEGIN{system(\"rm -rf .claude/proof/runs/X\")}'",
+                        f"git apply <<'EOF'\n+++ b/{findings}\n+pass\nEOF",
+                        "git clean -fdx .claude/proof",
+                        "echo x > .git/MERGE_MSG",
+                        f"curl -sSLo {findings} http://x",
+                        "node -p \"require('fs').writeFileSync('.claude/proof/runs/X/findings.json',1)\"",
+                        "cat <<'EOF' | ksh\nrm -rf .claude/proof/runs/X\nEOF",
+                        "r\\\nm -rf .claude/proof/runs/X",
+                        "env GIT_REFLOG_ACTION\\=rebase git commit -m x",
+                        "d=~/.local/state/gate; : ${GIT_REFLOG_ACTION:=rebase}",
+                        f"cat <<EOF\nx\nrm -rf .claude/proof/runs/X"):
+            self.assertTrue(self.denied(command, cwd="/work/wt"), command)
+
+    def test_a_find_exec_over_a_protected_path_is_a_write_unless_it_only_reads(self):
+        for command in ("find .claude/proof/runs -exec sudo rm {} +",
+                        "find .claude/proof/runs -exec sh -c 'rm x' {} ;",
+                        "find .claude/proof/runs -exec python3 -c 'x' {} ;",
+                        "find .claude/proof/runs -exec rm {} +", "find .claude/proof/runs -delete"):
+            self.assertTrue(self.denied(command, cwd="/work/wt"), command)
+        for command in ("find .claude/proof/runs -name '*.json' -exec cat {} +", "find .claude/proof/runs -type f"):
+            self.assertFalse(self.denied(command, cwd="/work/wt"), command)
+
+    def test_the_fifth_review_false_refusals_are_allowed(self):
+        for command in ("cp notes.md ~/.claude", "cp notes.md ~/personal", "rm docs/rebase-merge-notes.md",
+                        "ruby -rtime -e 'puts 1'", "perl -Mstrict -e 'print 1'", "echo $((1<<2))",
+                        "echo 'read the GIT_REFLOG_ACTION docs'", "rg 'printf.*GIT_REFLOG_ACTION' gate.py",
+                        "python3 -W ignore ~/personal/scripts/gate/gate.py units"):
+            self.assertFalse(self.denied(command, cwd="/work/wt"), command)
+
     def test_a_guard_that_crashes_refuses(self):
         payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}})
         with mock.patch.object(gate, "guard_bash", side_effect=RecursionError), \
@@ -936,6 +1045,32 @@ class SetupTest(unittest.TestCase):
                 mock.patch.object(gate, "build_gate_worktree", lambda: calls.append(bool(held))):
             gate.setup()
         self.assertEqual(calls, [True])
+
+
+class GrandfatherScriptTest(unittest.TestCase):
+    SCRIPT = GATE_FILE.parent / "grandfather_decisions.py"
+
+    def run_script(self, home, repository):
+        environment = {**os.environ, "HOME": str(home), "IPAAS_GATE_REPOSITORY": str(repository)}
+        return subprocess.run([sys.executable, str(self.SCRIPT)], capture_output=True, text=True, env=environment)
+
+    def test_a_missing_list_with_the_epoch_set_refuses_instead_of_relisting(self):
+        directory = Path(tempfile.mkdtemp(prefix="gate-grandfather-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        home, repository = directory / "home", directory / "repo"
+        repository.mkdir(parents=True)
+        sh(repository, "git", "init", "-q", "-b", "main")
+        sh(repository, "git", "config", "user.email", "t@e.com")
+        sh(repository, "git", "config", "user.name", "t")
+        sh(repository, "git", "commit", "-q", "--allow-empty", "-m", "base")
+        self.assertEqual(self.run_script(home, repository).returncode, 0, "the first run takes the list")
+        listing = home / ".local/state/gate/grandfathered-decisions.json"
+        self.assertTrue(listing.exists())
+        self.assertEqual(self.run_script(home, repository).returncode, 0, "a second run keeps the list")
+        listing.unlink()
+        refused = self.run_script(home, repository)
+        self.assertNotEqual(refused.returncode, 0, "the list is gone but the epoch is set, so it refuses")
+        self.assertIn("missing", (refused.stderr + refused.stdout).lower())
 
 
 class ReviewSlugTest(unittest.TestCase):
@@ -1353,6 +1488,7 @@ class UnitStageTest(unittest.TestCase):
     def test_a_spec_that_fails_to_load_is_red_not_a_runner_error(self):
         baseline = self.run_with(gate.run_outcome(True, errors_outside=1, coverage=None))
         self.assertEqual((baseline["runner_errors"], list(baseline["red"])), ([], ["platform/spec/a_spec.rb"]))
+        self.assertEqual(baseline["unloaded"], ["platform/spec/a_spec.rb"], "its units are unmeasured, not unexecuted")
 
     @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
     def test_code_inside_a_log_message_is_not_a_unit_and_a_built_query_is(self):
@@ -1372,6 +1508,16 @@ class UnitStageTest(unittest.TestCase):
             path.write_text("def fail_it(result)\n  result.error(\"Missing account #{x || y}\")\nend\n")
             found = find_units_with(["ruby", str(gate.RUBY_UNIT_FINDER)], path, [2])
             self.assertIn(("fallback", "x || y"), [(unit["kind"], unit["original"]) for unit in found["units"]])
+
+    @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
+    def test_a_block_form_log_call_and_a_bare_log_receiver_skip_their_interpolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "log.rb"
+            path.write_text("def note(x, y)\n  logger.debug { \"value #{x || y}\" }\n"
+                            "  log.warn(\"two #{x || y}\")\nend\n")
+            found = find_units_with(["ruby", str(gate.RUBY_UNIT_FINDER)], path, [2, 3])
+            self.assertNotIn("x || y", [unit["original"] for unit in found["units"]],
+                             "code inside a block-form or bare-logger message is not a unit")
 
     @unittest.skipUnless(shutil.which("ruby"), "ruby is not installed")
     def test_a_heredoc_statement_is_not_a_unit_and_units_carry_their_scope(self):

@@ -187,9 +187,10 @@ FINALIZE_TIMEOUT_SECONDS = 1800
 UPSTREAM_BRANCH = "origin/main"
 # Case-insensitive on purpose: git's own convention is `Co-authored-by:`, the commit skill writes
 # `Co-Authored-By:`, and a case-sensitive pattern let a Claude commit past the gate unseen.
-# Up to three leading spaces: `git merge --squash` indents the squashed commits' messages by four, and the owner's
-# own squash of Claude commits is the owner's commit, while a message typed with a small indent is still Claude's.
-CLAUDE_TRAILER_PATTERN = re.compile(r"^ {0,3}Co-authored-by:\s*Claude", re.MULTILINE | re.IGNORECASE)
+# Up to three leading spaces or tabs: `git merge --squash` indents the squashed commits' messages by four spaces,
+# and the owner's own squash of Claude commits is the owner's commit, while a message typed with a small indent,
+# spaces or a tab, is still Claude's.
+CLAUDE_TRAILER_PATTERN = re.compile(r"^[ \t]{0,3}Co-authored-by:\s*Claude", re.MULTILINE | re.IGNORECASE)
 GATE_EPOCH = "2026-09-06T00:00:00+00:00"
 
 # Toolchain locations and budgets.
@@ -339,7 +340,8 @@ SMART_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u20
 # are an echo of the owner, not the gate speaking, so they never make the owner's own words count as gate text.
 ECHO_LINE = re.compile(r"^\s*(?:their words:|Evidence:)|Reason on record:|one-shot skip token used")
 # A soft start after a piece that says no anywhere is no start: "Do not under any circumstances: merge it".
-NEGATION = re.compile(r"\b(?:not|never|no|nope|nah|cannot|dont)\b|n't\b")
+NEGATION = re.compile(r"\b(?:not|never|no|nope|nah|cannot|dont|cant|wont|shouldnt|didnt|doesnt|isnt|arent|"
+                      r"wasnt|werent|wouldnt|couldnt|havent|hasnt|hadnt|aint)\b|\w*n't\b")
 # What comparison ignores at either end of the evidence does not count toward its length: spaces, quotes,
 # backticks and closing punctuation. "yes.........." is three characters.
 EVIDENCE_PADDING = " \"'.!?:;,-"
@@ -365,13 +367,19 @@ PHASED_DIRECTORY = Path(__file__).resolve().parent.parent / "phased"
 WRITE_PROGRAMS = ("tee", "rm", "mv", "cp", "chmod", "truncate", "ln", "install", "dd", "touch", "mkdir", "rsync",
                   "unlink", "rmdir", "shred", "patch", "tar", "unzip", "ditto", "cpio")
 IN_PLACE_EDITORS = ("sed", "gsed", "perl", "ruby")
-# `-i`, `-Ei`, `-pi`, `--in-place=.bak`, but not ruby's and perl's `-I` include path.
-IN_PLACE_FLAG = re.compile(r"^-(?![-I])[a-zA-Z]*i|^--in-place\b")
+AWK_PROGRAMS = ("awk", "gawk", "mawk", "nawk")
+# perl and ruby flags that consume the rest of their single-dash cluster as a value, so an `i` after one is
+# part of that value, not the in-place flag: `-rtime` is `require "time"`, not in-place.
+PERL_VALUE_FLAGS = "eEMmIrxS"
 DOWNLOAD_OUTPUT_FLAGS = {"curl": ("-o", "-O", "--output", "--remote-name", "--output-dir"),
                          "wget": ("-O", "-o", "-P", "--output-document", "--output-file", "--directory-prefix")}
 GIT_WRITE_SUBCOMMANDS = ("checkout", "restore", "switch", "reset", "clean", "stash", "apply", "am", "mv", "rm")
 GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace")
 FIND_EXEC_ACTIONS = ("-exec", "-execdir", "-ok", "-okdir")
+# The programs a `find -exec` block may run over a protected path: each only reads. A shell, an interpreter or
+# any program not on this list is judged a write, because `-exec sh -c '...'` and `-exec rm` destroy the tree.
+FIND_EXEC_READERS = ("cat", "head", "tail", "wc", "grep", "egrep", "rg", "ls", "stat", "jq", "yq", "diff", "file",
+                     "find", "echo", "true", "test", "md5", "md5sum", "shasum", "sha256sum", "xxd", "od")
 # What git leaves while a rebase replays commits it did not write, measured on git 2.50. A pick carries
 # CHERRY_PICK_HEAD inside rebase-merge; `rebase --continue` after a conflict carries REBASE_HEAD without
 # rebase-merge/amend; a reword runs `git commit` with GIT_REFLOG_ACTION `rebase (reword)`. A commit the user
@@ -393,14 +401,20 @@ GIT_REPLAY_STATE = (*REBASE_DIRECTORIES, PICK_MARKER, CONFLICT_REPLAY_MARKER, ME
 GUARD_FORBIDDEN_ANYWHERE = ("--no-verify", "hooksPath", ".git/hooks", "skip-once", ".gate-skip-once", "GATE_SKIP",
                             "send-pack", "GIT_DIR=", "phased pause", "phased resume", "settings.local.json",
                             "launchctl", "send-keys")
-# Reading the name is fine (`grep -n GIT_REFLOG_ACTION gate.py`); setting it is not.
-REFLOG_ACTION_SETTING = re.compile(r"\bGIT_REFLOG_ACTION\s*\+?=|"
-                                   r"\b(?:export|declare|typeset|local|readonly|read|printf)\b[^\n;|&]*\bGIT_REFLOG_ACTION\b")
+# Reading the name is fine (`grep -n GIT_REFLOG_ACTION gate.py`); setting it is not, whatever the quoting:
+# a bare `=`, a quoted or escaped one (`env VAR\=`, `VAR"=x"`), a `:=` default, or `os.environ['VAR']=` and
+# `ENV["VAR"]=` from an inline program.
+REFLOG_ACTION_SETTING = re.compile(r"GIT_REFLOG_ACTION['\"\]]*\s*\\?\+?:?=|"
+                                   r"\b(?:export|declare|typeset|local|readonly|read|setenv)\s+(?:-\w+\s+)*"
+                                   r"GIT_REFLOG_ACTION\b")
 GUARD_WRITE_PROTECTED = (*(f"{PROOF_DIRECTORY}/{name}" for name in (RUNS_DIRECTORY_NAME, REFERENCES_DIRECTORY_NAME,
                                                                      REVIEWS_DIRECTORY_NAME, LIVE_DIRECTORY_NAME,
                                                                      BASE_CACHE_NAME, FIGMA_MISMATCH_FILE_NAME)),
                          str(DEVIATIONS_PATH), str(COMMENTS_PATH), "personal/scripts/gate", "personal/scripts/phased",
-                         ".local/state/gate", ".local/state/phased", *GIT_REPLAY_STATE)
+                         ".local/state/gate", ".local/state/phased")
+# git's replay and merge files are matched only as the final segment of a path under a git directory, so
+# `> .git/MERGE_MSG` is refused while `docs/rebase-merge-notes.md` and `~/.claude` are left alone.
+GIT_STATE_SEGMENTS = GIT_REPLAY_STATE
 GUARD_ALLOWED_COMMANDS = (".claude/bin/agent_task_finalize", ".claude/bin/pr-comment", ".claude/bin/pr-phase",
                           ".claude/bin/review-record", ".claude/bin/deviation", ".claude/bin/pr-diagram", ".claude/bin/pr-create",
                           ".claude/bin/comment-triage", ".claude/bin/live-record",
@@ -409,7 +423,6 @@ GUARD_ALLOWED_COMMANDS = (".claude/bin/agent_task_finalize", ".claude/bin/pr-com
 # while `mkdir -p .claude/proof` and `touch` on one change nothing in it.
 GUARD_PROTECTED_ANCESTORS = tuple(sorted({"/".join(path.split("/")[:count]) for path in GUARD_WRITE_PROTECTED
                                           for count in range(1, path.count("/") + 1)} - {""}))
-CREATES_ONLY = ("mkdir", "touch")
 GATE_WRAPPER_NAMES = tuple(sorted({Path(allowed.split()[0]).name for allowed in GUARD_ALLOWED_COMMANDS}))
 SHELL_ASSIGNMENT = re.compile(r"^[A-Za-z_]\w*=")
 # Words that run the next word as the program, with how many arguments of their own they take first.
@@ -419,9 +432,11 @@ SEGMENT_WRAPPERS = {"env": 0, "nohup": 0, "command": 0, "exec": 0, "builtin": 0,
 WRAPPER_VALUE_OPTIONS = {"env": ("-u", "-C", "-P", "-S"), "timeout": ("-s", "-k", "--signal", "--kill-after"),
                          "sudo": ("-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"), "nice": ("-n",),
                          "xargs": ("-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-d", "-E"),
-                         "stdbuf": ("-i", "-o", "-e")}
-# Words in front of the program that are the shell's own: `{ rm x; }`, `if true; then rm x; fi`, `! rm x`.
-SHELL_RESERVED_WORDS = ("{", "}", "!", "if", "then", "else", "elif", "do", "while", "until")
+                         "stdbuf": ("-i", "-o", "-e"), "exec": ("-a",), "caffeinate": ("-t", "-w"),
+                         "doas": ("-u", "-g", "-C")}
+# Words in front of the program that are the shell's own: `{ rm x; }`, `if true; then rm x; fi`, `! rm x`,
+# `coproc rm x`, a `function name` or `name()` header, and a `case word in` with its pattern word.
+SHELL_RESERVED_WORDS = ("{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "coproc", "in", "esac")
 DIRECTORY_CHANGERS = ("cd", "pushd")
 CLAUDE_PROGRAMS = ("claude", "claude-code")
 PRINT_FLAGS = {"-p", "--print"}
@@ -461,9 +476,11 @@ GUARD_ALLOWED_GATE_SUBCOMMANDS = ("setup", "references", "checks", "finalize", "
 SHELL_NAMES = ("bash", "sh", "zsh", "dash", "ksh", "csh", "tcsh", "fish")
 # Programs that read a heredoc as data. A heredoc fed to any other program is judged as commands, because a
 # program the guard does not know may run it: `cat <<'EOF' | source /dev/stdin`.
+# A heredoc fed to one of these is data. awk, sed, sqlite3, psql, mysql and curl are left out on purpose: each
+# can run a command or write a file from what it reads (awk `system`, sed `w`, sqlite3 `.import`, curl `-K -`),
+# so a heredoc fed to them is judged as commands.
 DATA_READERS = ("cat", "tee", "git", "gh", "jq", "yq", "grep", "egrep", "rg", "head", "tail", "wc", "sort", "uniq",
-                "base64", "pbcopy", "diff", "column", "xxd", "less", "awk", "sed", "tr", "cut", "mysql", "psql",
-                "sqlite3", "curl", "gate.py")
+                "base64", "pbcopy", "diff", "column", "xxd", "less", "tr", "cut", "gate.py")
 INTERPRETERS = ("python", "python3", "ruby", "node", "perl", *SHELL_NAMES)
 INTERPRETER_NAME = re.compile(rf"^(?:{'|'.join(INTERPRETERS)})(?:\.\d+)?$")
 SHELL_COMMAND_FLAG = re.compile(r"^-[a-zA-Z]*c[a-zA-Z]*$")
@@ -473,12 +490,13 @@ HOME_STATE_HINTS = (".local/state", "owner-words", "waivers", "unit-cache", ".ga
 GATE_IMPORT = re.compile(r"\bimport\s+gate\b|\bfrom\s+gate\s+import\b|spec_from_file_location\([^)]*gate|"
                          r"sys\.path[^\n]*scripts/gate|runpy\.run_(?:path|module)\([^)]*gate|"
                          r"(?:import_module|__import__)\(\s*['\"]gate['\"]")
-HEREDOC_OPENER = re.compile(r"<<(?P<strip>-?)[ \t]*(?:(?P<mark>['\"])(?P<quoted>[^'\"\n]+)(?P=mark)|"
-                            r"(?P<escaped>\\)?(?P<bare>[A-Za-z_][\w.-]*))")
 # Each redirect operator becomes a word of its own, so `echo {}>file` and `cmd &>file` redirect as surely as
 # `echo {} > file`. `<<` and `<(` are read before this.
 REDIRECT_OPERATOR = re.compile(r"&>>?|<>|>>|>\||>&|<&|>|<")
 OUTPUT_REDIRECTS = (">", ">>", ">|", ">&", "&>", "&>>", "<>")
+# Every redirect operator the scanner emits as its own word, so a redirect written before the program is
+# dropped before the program is read. `<<` and `<<<` are handled in the scanner.
+ALL_REDIRECTS = (*OUTPUT_REDIRECTS, "<", "<&")
 MAX_GUARD_NESTING = 8
 # What a substitution leaves in its segment: `f=$(ls * | head -1)` is one assignment, not a program named `*`.
 SUBSTITUTION_PLACEHOLDER = "SUBSTITUTION"
@@ -493,7 +511,9 @@ INLINE_WRITES = re.compile(r"""open\((?:[^()]|\([^()]*\))*,\s*(?:mode\s*=\s*)?['
                            r"""os\.(?:replace|rename|remove|unlink|system|truncate)\(|shutil\.|subprocess\.|"""
                            r"""File\.(?:write|binwrite|delete|unlink|rename|truncate)\(|IO\.(?:binwrite|write)|"""
                            r"""FileUtils\.|File\.open\((?:[^()]|\([^()]*\))*,(?!\s*['"]rb?['"]\s*[,)])|"""
-                           r"""(?:\.|\b)(?:writeFile|appendFile)(?:Sync)?\(|\.(?:unlink|rm|rename|copyFile|truncate)(?:Sync)?\(""")
+                           r"""(?:\.|\b)(?:writeFile|appendFile)(?:Sync)?\(|"""
+                           r"""\.(?:unlink|rm|rename|copyFile|truncate)(?:Sync)?\(|`[^`]*>|"""
+                           r"""\b(?:unlink|rename|truncate|system|syswrite)\s*[(\s"']|open\([^)]*,\s*['"]?[+]?>""")
 GUARD_HOOK_MATCHER = "Bash|Edit|Write|MultiEdit|NotebookEdit"
 # Hooks every worktree must carry: the guard before a tool runs, and the store of the owner's answers
 # after a question dialog.
@@ -2273,10 +2293,10 @@ def units_command(arguments):
         print("\n".join(unit_report_lines((findings or {}).get("units"))))
         return
     # The measure holds the gate lock every proof waits for, so it stops at a budget unless asked for no limit.
-    budget = argument_value(arguments, "--budget", str(UNIT_STAGE_BUDGET_SECONDS))
-    if not budget.isdigit():
-        sys.exit(f"units: --budget takes a whole number of seconds, 0 for no limit, not {budget!r}")
-    budget = int(budget)
+    budget_text = argument_value(arguments, "--budget", str(UNIT_STAGE_BUDGET_SECONDS))
+    if not budget_text.isdigit():
+        sys.exit(f"units: --budget takes a whole number of seconds, 0 for no limit, not {budget_text!r}")
+    budget = int(budget_text)
     base_sha = diff_base(root)
     spec_patch, code_patch, paths = split_patch(snapshot_patch(root, base_sha))
     given = argument_value(arguments, "--out")
@@ -2459,22 +2479,35 @@ def commit_msg(arguments):
     if replay:
         print(f"gate: {replay} says git is replaying a commit it did not write, so its trailers stay as they are.",
               file=sys.stderr)
-        keep_highest_phase(root, message_path)
+        # A reword types a new message now, so a phase typed into it is not the replayed commit's own. Keep only
+        # the phase the commit already on HEAD carried; a pick or a continue replays an authored message, so it
+        # stays, and a squash keeps its highest trailer.
+        if is_reword(replay):
+            set_phase(root, message_path, head_phase(root))
+        else:
+            keep_highest_phase(root, message_path)
         return
+    own_phase = phase_of_message(message_path)
     claude = bool(CLAUDE_TRAILER_PATTERN.search(message_path.read_text()))
     staged_code = claude and stages_code(root)
     # An amend that stages nothing still makes a commit of HEAD's code, so a phase typed into its message would
-    # exempt that code from the proof and from CI. Only the phase HEAD already carried stays.
-    amended_code = claude and source == "commit" and not staged_code and touches_code(root, "HEAD")
-    stamped = stamped_phase(phase_number(root), phase_of_message(message_path), source)
-    if stamped is not None:
-        git(root, "interpret-trailers", "--in-place", "--if-exists", "replace",
-            "--trailer", f"{PHASE_TRAILER}: {stamped}", str(message_path))
-        write_ci_skip(message_path, stamped)
-    elif staged_code or (amended_code and phase_of_message(message_path) != head_phase(root)):
-        drop_phase(message_path)
+    # exempt that code from the proof and from CI, whatever the phase now active. An amend with `-m` or `-F` is
+    # reported with the source `message`, not `commit`, so both are checked. Only the phase HEAD carried stays.
+    amended_code = claude and source in ("commit", "message") and not staged_code and touches_code(root, "HEAD")
+    if amended_code:
+        set_phase(root, message_path, head_phase(root))
+    else:
+        stamped = stamped_phase(phase_number(root), own_phase, source)
+        if stamped is not None:
+            set_phase(root, message_path, stamped)
+        elif staged_code:
+            drop_phase(message_path)
     if not (staged_code or amended_code):
         return
+    # Clear the reference verdict first, so a later amend that removes nothing drops a stale `not-computed` or
+    # `Used` instead of carrying it for ever: `--if-exists replace` leaves a trailer proof_trailers omits.
+    verdict_lines = (f"{REFERENCES_VERDICT_TRAILER}:", f"{UNPROVABLE_TRAILER}:")
+    keep_lines(message_path, lambda line: not line.startswith(verdict_lines))
     for trailer, value in proof_trailers(root):
         git(root, "interpret-trailers", "--in-place", "--if-exists", "replace", "--trailer", f"{trailer}: {value}",
             str(message_path))
@@ -2566,6 +2599,24 @@ def drop_phase(message_path):
     keep_lines(message_path, lambda line: not PHASE_TRAILER_LINE.match(line) and line.strip() != CI_SKIP_KEYWORD)
 
 
+def set_phase(root, message_path, phase):
+    """Make the message carry exactly `phase`: its trailer and the `[skip ci]` a phase 1 to 5 commit takes, or
+    neither when `phase` is None. A message amend restores the phase HEAD carried this way, so a phase typed
+    into the new message cannot exempt code HEAD already holds."""
+    if phase is None:
+        drop_phase(message_path)
+        return
+    git(root, "interpret-trailers", "--in-place", "--if-exists", "replace",
+        "--trailer", f"{PHASE_TRAILER}: {phase}", str(message_path))
+    write_ci_skip(message_path, phase)
+
+
+def is_reword(marker):
+    """A reword re-types a commit's message now, so a phase in it is the session's, not the replayed commit's.
+    A pick, a continue and a squash replay an authored message, which the gate keeps as it is."""
+    return marker.startswith("GIT_REFLOG_ACTION=") and "reword" in marker
+
+
 def write_ci_skip(message_path, phase):
     """Put the keyword in the body of a phase 1 to 5 commit, above git's comment block so a verbose commit
     template cannot cut it off. One keyword is enough; an existing one of any spelling is left alone. A
@@ -2614,7 +2665,11 @@ def commit_references_report(root):
     try:
         return references_report_for(root)
     except Exception:  # noqa: BLE001 - a trailer is evidence, never a reason to refuse the commit
-        return fresh_references_report(root) or {"verdict": VERDICT_NOT_COMPUTED}
+        try:
+            stored = fresh_references_report(root)
+        except Exception:  # noqa: BLE001 - the fallback must not raise the error it stands in for
+            stored = None
+        return stored or {"verdict": VERDICT_NOT_COMPUTED}
 
 
 def proof_trailers(root):
@@ -2837,6 +2892,7 @@ def evidence_length(evidence):
     """The evidence's length without the padding comparison ignores at its ends, so "yes.........." and
     "``````````yes" are three characters, while the dash inside "c2 - get in A" still counts."""
     text = re.sub(r"\s+", " ", unicodedata.normalize("NFC", evidence or "").translate(SMART_QUOTES))
+    text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", text.strip(EVIDENCE_PADDING))
     return len(text.strip(EVIDENCE_PADDING))
 
 
@@ -2872,6 +2928,10 @@ def decision_digest(record):
     return hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:DECISION_DIGEST_LENGTH]
 
 
+def recorded_before(record, moment):
+    return (record.get("recorded_at") or "") < moment
+
+
 def owner_words_epoch():
     def compute():
         try:
@@ -2890,7 +2950,7 @@ def owner_decision_holds(record):
     recorded with. One dated before the store went live holds only when it is on the list taken when it went
     live: a record anyone can write must not excuse itself by its own date."""
     recorded_at = record.get("recorded_at") or ""
-    if recorded_at < owner_words_epoch():
+    if recorded_before(record, owner_words_epoch()):
         return decision_digest(record) in grandfathered_decisions()
     if not record.get("worktree"):
         return False
@@ -4038,19 +4098,25 @@ def guard_bash(command, cwd=None, depth=0):
     # judged the same way, from the directory of the segment that runs it.
     nested, interpreter_bodies = list(scan.substitutions), []
     for heredoc in scan.heredocs:
-        programs = [Path(words[0]).name for _segment, words in heredoc_readers(scan, segments, heredoc) if words]
+        readers = [words for _segment, words in heredoc_readers(scan, segments, heredoc) if words]
+        programs = [Path(words[0]).name for words in readers]
         if any(INTERPRETER_NAME.match(name) for name in programs):
             interpreter_bodies.append(heredoc.body)
-        if any(runs_heredoc_as_commands(name) for name in programs):
+        # A body fed to a program that writes files (patch, `git apply`, tee, dd) can carry a protected path of
+        # its own, which the segment's own words never name. A body whose tag was never closed is not data either.
+        if any(writes_files(words) for words in readers):
+            if any(path in heredoc.body for path in GUARD_WRITE_PROTECTED):
+                return "feeding a protected path into a program that writes files forges or weakens the gate."
+        if not heredoc.terminated or any(runs_heredoc_as_commands(name) for name in programs):
             nested.append((heredoc.segment, heredoc.body))
     if inline_program_writes_state(interpreter_bodies, segments):
         return ("an inline program that writes the gate's state forges it, whatever the path looks like. Read the "
                 "state with the Read tool, `json.load`, or a gate.py subcommand (`trace`, `units`, `checks`).")
     directory, directories = Path(cwd or os.getcwd()), []
-    for segment, words in segments:
+    for index, (segment, words) in enumerate(segments):
         directories.append(directory)
-        programs = shell_program_text(words) + [shlex.join(block) for block in find_exec_blocks(words)]
-        nested += [(len(directories) - 1, program) for program in programs]
+        nested_texts = shell_program_text(words) + [shlex.join(block) for block in find_exec_blocks(words)]
+        nested += [(index, text) for text in nested_texts]
         reason = guard_program(words)
         if reason:
             return reason
@@ -4068,6 +4134,7 @@ def guard_bash(command, cwd=None, depth=0):
 class Heredoc(NamedTuple):
     segment: int
     quoted: bool
+    terminated: bool
     body: str
 
 
@@ -4085,6 +4152,34 @@ def heredoc_readers(scan, segments, heredoc):
     while last < len(scan.pipes) and scan.pipes[last]:
         last += 1
     return segments[heredoc.segment:last + 1]
+
+
+def read_heredoc_tag(command, index):
+    """The delimiter word of a heredoc opened at `index`, read as bash reads it: a `-` strips tabs, quotes and
+    backslashes are removed and mark the body as literal, and the word runs to the first unquoted blank or
+    operator. Returns (tag, strip_tabs, quoted, end_index); tag is empty when nothing follows `<<`."""
+    position = index + 2
+    strip_tabs = command[position:position + 1] == "-"
+    position += 1 if strip_tabs else 0
+    while command[position:position + 1] in (" ", "\t"):
+        position += 1
+    letters, quoted = [], False
+    while position < len(command) and command[position] not in " \t\n;|&<>()":
+        character = command[position]
+        if character in "'\"":
+            quoted, position = True, position + 1
+            while position < len(command) and command[position] != character:
+                letters.append(command[position])
+                position += 1
+            position += 1
+        elif character == "\\":
+            quoted = True
+            letters.append(command[position + 1:position + 2])
+            position += 2
+        else:
+            letters.append(character)
+            position += 1
+    return "".join(letters), strip_tabs, quoted, position
 
 
 def scan_shell(command):
@@ -4112,8 +4207,28 @@ def scan_shell(command):
             index += 1
             continue
         if character == "\\":
+            # bash removes a backslash-newline before it splits words, so `r\<newline>m` runs `rm`.
+            if command[index + 1:index + 2] == "\n":
+                index += 2
+                continue
             current.append(command[index:index + 2])
             index += 2
+            continue
+        if quote is None and two == "$'":
+            # ANSI-C quoting: a backslash escapes the next character until the closing quote. Keep the whole span
+            # as one opaque word, so a `'` written as `\'` cannot close it early and let `; rm` split out.
+            k = index + 2
+            while k < len(command) and command[k] != "'":
+                k += 2 if command[k] == "\\" else 1
+            current.append(SUBSTITUTION_PLACEHOLDER)
+            index = min(k + 1, len(command))
+            continue
+        if quote is None and command.startswith("$[", index):
+            # old-style arithmetic `$[ 1<<2 ]`: a `<<` inside it opens no heredoc.
+            close = command.find("]", index)
+            close = len(command) if close == -1 else close
+            current.append(command[index:close + 1])
+            index = close + 1
             continue
         if two == "$(" or (quote is None and two in ("<(", ">(")):
             closing = matching_paren(command, index + 1)
@@ -4132,7 +4247,8 @@ def scan_shell(command):
             current.append(character)
             index += 1
             continue
-        word_start = index == 0 or command[index - 1] in " \t\n;|&()"
+        # A `#` starts a comment only at a word boundary, and an escaped space (`a\ #`) is not one.
+        word_start = (index == 0 or command[index - 1] in " \t\n;|&()") and command[index - 2:index - 1] != "\\"
         if character == "#" and word_start:
             end = command.find("\n", index)
             index = len(command) if end == -1 else end
@@ -4141,14 +4257,13 @@ def scan_shell(command):
             current.append(" <<< ")
             index += 3
             continue
-        opener = HEREDOC_OPENER.match(command, index)
-        if opener:
-            quoted = bool(opener.group("quoted") or opener.group("escaped"))
-            pending.append((opener.group("quoted") or opener.group("bare"), bool(opener.group("strip")), quoted,
-                            len(segments)))
-            current.append(f" {opener.group(0)} ")
-            index = opener.end()
-            continue
+        if two == "<<":
+            tag, strip_tabs, quoted, end = read_heredoc_tag(command, index)
+            if tag:
+                pending.append((tag, strip_tabs, quoted, len(segments)))
+                current.append(f" {command[index:end]} ")
+                index = end
+                continue
         if two in ("&&", "||"):
             end_segment()
             index += 2
@@ -4175,15 +4290,16 @@ def read_heredoc_bodies(command, index, pending, heredocs, substitutions):
     """The bodies of the heredocs opened on the line that just ended, in order, each up to its own tag. bash
     expands `$(...)` and backticks in a body whose tag is unquoted, whatever program reads it."""
     for tag, strip_tabs, quoted, segment in pending:
-        body = []
+        body, terminated = [], False
         while index < len(command):
             end = command.find("\n", index)
             end = len(command) if end == -1 else end
             text, index = command[index:end], end + 1
             if (text.lstrip("\t") if strip_tabs else text).rstrip(" \t") == tag:
+                terminated = True
                 break
             body.append(text)
-        heredocs.append(Heredoc(segment, quoted, "\n".join(body)))
+        heredocs.append(Heredoc(segment, quoted, terminated, "\n".join(body)))
         if not quoted:
             substitutions.extend((segment, text) for text in expanded_substitutions("\n".join(body)))
     pending.clear()
@@ -4330,12 +4446,24 @@ def top_level_arguments(text):
 
 def inline_programs(heredoc_bodies, segments):
     """The text of every inline program on the line: the body of a heredoc fed to an interpreter, with or without
-    the `-`, and the argument of `-c`, `-e` or `--eval`."""
+    the `-`, and the argument of an eval flag, attached in a cluster (`-Bc`, `-we`) or on its own (`-c`, `-e`,
+    `--eval`, node's `-p`)."""
     programs = list(heredoc_bodies)
     for _segment, words in segments:
         if words and INTERPRETER_NAME.match(Path(words[0]).name):
-            programs += flag_values(words, PROGRAM_FLAGS.__contains__)
+            programs += eval_flag_values(words)
     return programs
+
+
+def eval_flag_values(words):
+    """The program text after each eval flag: `-c` for python and the shells, `-e`/`-E` for ruby and perl,
+    `-p`/`--print` for node, and `--eval`, whether the flag is on its own or the last letter of a cluster."""
+    values = []
+    for position, word in enumerate(words[:-1]):
+        cluster_flag = word.startswith("-") and not word.startswith("--") and word[-1:] in "ceEp"
+        if word in ("--eval", "--print") or cluster_flag:
+            values.append(words[position + 1])
+    return values
 
 
 def segment_words(segment, variables):
@@ -4353,18 +4481,60 @@ def segment_words(segment, variables):
     return program_words(words[len(assignments):])
 
 
-def program_words(words):
-    """The words from the program that runs: reserved words (`then`, `{`, `!`) go, and so do wrappers (`env`,
-    `sudo -u x`, `timeout 60`, `xargs -n 1`) with their own options and assignments."""
-    while words and (words[0] in SHELL_RESERVED_WORDS or words[0] in SEGMENT_WRAPPERS):
-        wrapper, words = words[0], words[1:]
-        if wrapper in SHELL_RESERVED_WORDS:
-            continue
-        takes_value = WRAPPER_VALUE_OPTIONS.get(wrapper, ())
-        while words and (words[0].startswith("-") or SHELL_ASSIGNMENT.match(words[0])):
-            words = words[2:] if words[0] in takes_value else words[1:]
-        words = words[SEGMENT_WRAPPERS[wrapper]:]
+def strip_leading_redirects(words):
+    """Drop a redirect written before the program, so `2>/dev/null rm x` and `>out tee x` read as `rm` and
+    `tee`. An operator takes the next word as its target unless that word is another operator."""
+    while words:
+        if words[0].isdigit() and words[1:2] and words[1] in ALL_REDIRECTS:
+            words = words[1:]
+        elif words[0] in ALL_REDIRECTS:
+            words = words[2:] if words[1:2] and words[1] not in ALL_REDIRECTS else words[1:]
+        else:
+            break
     return words
+
+
+def without_redirects(words):
+    """The words with every redirect operator and its target removed, wherever they sit, so a redirect between
+    the interpreter and its script (`python3 2>/dev/null gate.py surface`) cannot hide the script."""
+    clean, index = [], 0
+    while index < len(words):
+        word = words[index]
+        if word.isdigit() and words[index + 1:index + 2] and words[index + 1] in ALL_REDIRECTS:
+            index += 1
+            continue
+        if word in ALL_REDIRECTS:
+            index += 2 if words[index + 1:index + 2] and words[index + 1] not in ALL_REDIRECTS else 1
+            continue
+        clean.append(word)
+        index += 1
+    return clean
+
+
+def program_words(words):
+    """The words from the program that runs: a leading redirect goes, reserved words (`then`, `{`, `!`, `coproc`)
+    go, a `function name` or `name()` header and a `case word in pattern)` header go, and wrappers (`env`,
+    `/usr/bin/sudo -u x`, `timeout 60`, `xargs -n 1`, `exec -a x`) go with their own options and assignments.
+    A wrapper is known by its base name, so a full path cannot hide it."""
+    while True:
+        words = strip_leading_redirects(words)
+        if not words:
+            return words
+        first, name = words[0], Path(words[0]).name
+        if first == "function" or first.endswith("()"):
+            words = words[2:] if first == "function" else words[1:]
+        elif first == "case":
+            words = list(itertools.dropwhile(lambda word: not word.endswith(")"), words[1:]))[1:]
+        elif first in SHELL_RESERVED_WORDS or first.endswith(")"):
+            words = words[1:]
+        elif name in SEGMENT_WRAPPERS:
+            takes_value = WRAPPER_VALUE_OPTIONS.get(name, ())
+            words = words[1:]
+            while words and (words[0].startswith("-") or SHELL_ASSIGNMENT.match(words[0])):
+                words = words[2:] if words[0] in takes_value else words[1:]
+            words = words[SEGMENT_WRAPPERS[name]:]
+        else:
+            return words
 
 
 def expand_word(word, variables):
@@ -4405,6 +4575,7 @@ def gate_script_position(words):
 
 def gate_subcommand(words):
     """The subcommand a segment runs gate.py with: None when it runs no gate.py, "" when it names none."""
+    words = without_redirects(words)
     script = gate_script_position(words)
     if script is None:
         return None
@@ -4451,6 +4622,19 @@ def redirect_targets(words):
     return targets
 
 
+def glob_touches(protected, globs):
+    """Whether a glob could name the protected path: it matches it directly (`.claude/proof/r*`), or its literal
+    prefix before the first glob character already sits inside the protected path or holds it."""
+    for glob in globs:
+        if fnmatch.fnmatch(protected, glob):
+            return True
+        cut = min(glob.find(character) for character in "*?[" if character in glob)
+        prefix = glob[:cut]
+        if prefix and (prefix in protected or protected in prefix):
+            return True
+    return False
+
+
 def guard_segment(segment, words, directory):
     if COMMENT_WRAPPER not in segment and any(pattern.search(segment) for pattern in GUARD_COMMENT_POSTING):
         return ("a pull request comment must go through `.claude/bin/pr-comment --pr N --title \"...\" --body-file <path>`, "
@@ -4469,13 +4653,21 @@ def guard_segment(segment, words, directory):
                 "splices in that one phase section. Writing a whole body deletes every section you did not retype, "
                 "including the user's own edits, and GitHub keeps no revision history to restore them from.")
     # Every path the segment names, written out in full, so a protected path cannot hide behind `cd`, `pushd`,
-    # a relative redirect, `$HOME`, `~` or a variable the line set. A bare file name inside a protected
-    # directory counts as well.
+    # a relative redirect, `$HOME`, `~`, a variable the line set, or a glob (`.claude/proof/r*`). A bare file
+    # name inside a protected directory counts as well.
     written_out = [full_path(word, directory) for word in words]
+    globs = [word for word in [*words, *written_out] if any(character in word for character in "*?[")]
     spelled = [segment, str(directory), *written_out]
-    touched = [path for path in GUARD_WRITE_PROTECTED if any(path in text for text in spelled)]
-    if words and Path(words[0]).name not in CREATES_ONLY:
-        touched += [path for path in GUARD_PROTECTED_ANCESTORS if any(text.endswith(f"/{path}") for text in written_out)]
+    touched = [path for path in GUARD_WRITE_PROTECTED
+               if any(path in text for text in spelled) or glob_touches(path, globs)]
+    # Removing or emptying a directory that holds a protected path destroys the gate's evidence. Creating or
+    # writing a file next to it does not, so the ancestor rule is only for a program that removes a tree.
+    if removes_tree(words):
+        touched += [path for path in GUARD_PROTECTED_ANCESTORS
+                    if any(text == path or text.endswith(f"/{path}") for text in written_out)]
+    paths_written = [*written_out, *(full_path(target, directory) for target in redirect_targets(words))]
+    if any(Path(text).name in GIT_STATE_SEGMENTS and ".git" in Path(text).parts for text in paths_written):
+        return "writing git's replay or merge state by hand would make a new commit look like git's own."
     if not touched:
         return None
     for target in redirect_targets(words):
@@ -4493,22 +4685,99 @@ def writes_files(words):
     """Whether the segment's program writes files: `rm`, `tee`, `dd of=`, `sed -i`, `curl -o`, `git checkout`,
     `find -delete`. Judged by the program, so `git add` and `yarn install` write nothing here, and neither does a
     quoted message that holds "form"."""
+    words = program_words(without_redirects(words))
     if not words:
         return False
     program = Path(words[0]).name
     if program in IN_PLACE_EDITORS:
-        return any(IN_PLACE_FLAG.match(word) for word in words[1:])
+        return in_place_edit(program, words) or (program in ("sed", "gsed") and sed_writes(words))
+    if program in AWK_PROGRAMS:
+        return any("system(" in word or ">" in word for word in words[1:])
     if program in DOWNLOAD_OUTPUT_FLAGS:
-        flags = DOWNLOAD_OUTPUT_FLAGS[program]
-        return any(word.partition("=")[0] in flags or word[:2] in flags for word in words[1:])
+        return download_writes(program, words)
     if program == "git":
         return git_subcommand(words) in GIT_WRITE_SUBCOMMANDS
     if program == "find":
-        return "-delete" in words or any(writes_files(block) for block in find_exec_blocks(words))
+        return "-delete" in words or any(not exec_block_reads(block) for block in find_exec_blocks(words))
     return program in WRITE_PROGRAMS
 
 
+def exec_block_reads(block):
+    """Whether a `find -exec` block only reads: its program, past any wrapper, is on the read-only list and is
+    not itself a writer. A shell or an interpreter is never a reader here, because its own text can write."""
+    words = program_words(without_redirects(block))
+    if not words:
+        return True
+    return Path(words[0]).name in FIND_EXEC_READERS and not writes_files(words)
+
+
+def in_place_edit(program, words):
+    """Whether a `sed`, `perl` or `ruby` call edits a file in place. For sed, `-i` and macOS `-I` both do; for
+    perl and ruby, a value-taking flag earlier in the cluster swallows the letters after it, so `-rtime` and
+    `-Mstrict` are reads, while `-pi`, `-0pi` and `-i.bak` write."""
+    for word in words[1:]:
+        if word == "--in-place" or word.startswith("--in-place="):
+            return True
+        if not word.startswith("-") or word.startswith("--"):
+            continue
+        cluster = word[1:]
+        if program in ("sed", "gsed"):
+            if any(letter in "iI" for letter in cluster):
+                return True
+            continue
+        position = 0
+        while position < len(cluster):
+            letter = cluster[position]
+            if letter == "i":
+                return True
+            if letter == "0":
+                position += 1
+                while position < len(cluster) and cluster[position].isdigit():
+                    position += 1
+                continue
+            if letter in PERL_VALUE_FLAGS:
+                break
+            position += 1
+    return False
+
+
+SED_WRITE_COMMAND = re.compile(r"(?:^|[;{\s])[wW]\s|(?:^|[;{\s])e(?:\s|$)")
+
+
+def sed_writes(words):
+    """A sed script with a `w`, `W` or `e` command writes a file or runs a program."""
+    return any(SED_WRITE_COMMAND.search(word) for word in words[1:] if not word.startswith("-"))
+
+
+def download_writes(program, words):
+    """`curl -o f`, `wget -O f`, and the same letter inside a single-dash cluster (`curl -sSLo f`)."""
+    flags = DOWNLOAD_OUTPUT_FLAGS[program]
+    letters = "oO"
+    for word in words[1:]:
+        if word.partition("=")[0] in flags:
+            return True
+        if word.startswith("-") and not word.startswith("--") and any(letter in word[1:] for letter in letters):
+            return True
+    return False
+
+
+def removes_tree(words):
+    """Whether the program empties or deletes a directory, so emptying one that holds gate state destroys it:
+    `rm -rf`, `rmdir`, `shred`, `git clean`, `find ... -delete`."""
+    if not words:
+        return False
+    program = Path(words[0]).name
+    if program in ("rm", "rmdir", "shred"):
+        return True
+    if program == "git":
+        return git_subcommand(words) == "clean"
+    if program == "find":
+        return "-delete" in words
+    return False
+
+
 def git_subcommand(words):
+    words = without_redirects(words)
     position = 1
     while position < len(words) and words[position].startswith("-"):
         position += 2 if words[position] in GIT_VALUE_OPTIONS else 1

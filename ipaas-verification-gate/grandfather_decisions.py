@@ -10,6 +10,7 @@ quote the owner readable by the owner only.
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 GATE = Path(__file__).resolve().parent / "gate.py"
@@ -24,19 +25,25 @@ records = [record for record in records if isinstance(record, dict)]
 
 if gate.GRANDFATHERED_DECISIONS_FILE.exists():
     epoch = gate.owner_words_epoch()
-    listed = set(gate.read_json(gate.GRANDFATHERED_DECISIONS_FILE, default=[]) or [])
+    listed = set(gate.grandfathered_decisions())
     unlisted = [record.get("id") or record.get("digest") for record in records
-                if (record.get("recorded_at") or "") < epoch and gate.decision_digest(record) not in listed]
+                if gate.recorded_before(record, epoch) and gate.decision_digest(record) not in listed]
     print(f"epoch {epoch}: the list taken then holds {len(listed)} decision(s) and stays as it was")
     if unlisted:
         print(f"WARNING: {len(unlisted)} decision(s) dated before {epoch} were not on the list when it was taken, so "
               f"they must quote the owner: {unlisted}")
+elif gate.OWNER_WORDS_EPOCH_FILE.exists():
+    # The epoch is set but the list is gone: deleting the list and taking a new one would relist every record
+    # dated before now, excusing decisions the store never checked. Do not take a new list; tell the owner.
+    sys.exit(f"the grandfather list {gate.GRANDFATHERED_DECISIONS_FILE} is missing but the epoch "
+             f"{gate.OWNER_WORDS_EPOCH_FILE} is set. Restore the list from a backup, or clear both to take a new "
+             "one, which makes every decision recorded before now quote the owner again.")
 else:
     epoch = gate.now_iso()
     gate.OWNER_WORDS_EPOCH_FILE.parent.mkdir(parents=True, exist_ok=True)
     gate.OWNER_WORDS_EPOCH_FILE.write_text(epoch + "\n")
     os.chmod(gate.OWNER_WORDS_EPOCH_FILE, gate.PRIVATE_FILE_MODE)
-    digests = sorted({gate.decision_digest(record) for record in records if (record.get("recorded_at") or "") < epoch})
+    digests = sorted({gate.decision_digest(record) for record in records if gate.recorded_before(record, epoch)})
     gate.write_json(gate.GRANDFATHERED_DECISIONS_FILE, digests, mode=gate.PRIVATE_FILE_MODE)
     print(f"epoch {epoch}: {len(digests)} earlier decision(s) listed")
     print(json.dumps({"grandfathered": str(gate.GRANDFATHERED_DECISIONS_FILE), "digests": digests}, indent=2))

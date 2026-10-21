@@ -23,7 +23,9 @@ SCOPES = [Prism::DefNode, Prism::ClassNode, Prism::ModuleNode].freeze
 # method name is behaviour, and is judged.
 INTERPOLATIONS = [Prism::EmbeddedStatementsNode, Prism::InterpolatedStringNode, Prism::InterpolatedSymbolNode].freeze
 LOG_CALLS = %w[debug info warn error fatal log puts print p].freeze
-LOGGER_RECEIVER = /(?:\A|\.)@?logger\z/
+# A log call sits on no receiver (`puts`, `p`), or on a logger: `logger`, `LOGGER`, `@logger`, `Rails.logger`,
+# or a chain that ends in one (`Rails.logger.tagged(t)`).
+LOGGER_RECEIVER = /(?:\A|\.)@?log(?:ger)?\z/i
 # A heredoc's body sits after the line that opens it, outside the node, so removing the node leaves the body
 # behind as code that still parses and then fails to run, which reads as a kill.
 HEREDOC_OPENER = /<<[~-]?(["'`]?)[A-Za-z_]\w*\1/
@@ -77,14 +79,18 @@ end
 def log_call?(node)
   return false unless node.is_a?(Prism::CallNode) && LOG_CALLS.include?(node.name.to_s)
 
-  node.receiver.nil? || node.receiver.slice.match?(LOGGER_RECEIVER)
+  receiver = node.receiver
+  receiver.nil? || receiver.slice.match?(LOGGER_RECEIVER)
 end
 
-# Only an interpolation inside the log call's own arguments is log text: `Solution.where("... #{x}").p(1)` builds a
-# query in the receiver.
+# Only an interpolation inside the log call's own arguments or its block is log text: `Solution.where("... #{x}").p(1)`
+# builds a query in the receiver, while `logger.debug { "value #{x}" }` is a lazy log message.
 def inside_log_text?(ancestors)
   ancestors.each_with_index.any? do |ancestor, index|
-    log_call?(ancestor) && !ancestor.arguments.nil? && ancestors[index + 1].equal?(ancestor.arguments) &&
+    next false unless log_call?(ancestor)
+
+    held = [ancestor.arguments, ancestor.block].compact
+    held.any? { |part| ancestors[index + 1].equal?(part) } &&
       ancestors[(index + 1)..].any? { |inner| INTERPOLATIONS.any? { |kind| inner.is_a?(kind) } }
   end
 end

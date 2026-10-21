@@ -132,13 +132,16 @@ draft PR, one commit per phase, a human approval between phases. The phase skill
   on every new commit, whatever its message says. An amend takes the higher of its own phase and the
   active one. With no phase active, a Claude commit that adds code carries no phase: the hook removes the
   trailer and every line that is exactly `[skip ci]`. An amend that adds no code keeps only the phase its
-  commit already carried. Another skip spelling stays, and pre-push refuses it. A commit a rebase replays (a
-  pick, a reword, a continue after a conflict) keeps its trailers, and a squash keeps its highest phase; the
-  hook says so on standard error. A cherry-pick outside a rebase, `-n` or conflicted, is a new commit. Only a
-  real merge, which leaves `MERGE_HEAD`, keeps the message git wrote.
+  commit already carried, whatever the message now says and whatever phase is now active, and however the
+  amend is spelled (`--amend`, `--amend -m`, `--amend -F`). Another skip spelling stays, and pre-push refuses
+  it. A commit a rebase replays keeps its trailers: a pick and a continue after a conflict replay an authored
+  message, while a reword types a new one, so a reword keeps only the phase the commit already carried. A
+  squash keeps its highest phase; the hook says so on standard error. A cherry-pick outside a rebase, `-n` or
+  conflicted, is a new commit. Only a real merge, which leaves `MERGE_HEAD`, keeps the message git wrote.
 - `pre-push` lets phases 1 to 5 through without a proof and still refuses a `References-Verdict: Used`, and a
-  `References-Verdict: not-computed`, which a commit gets when the reference scan could not run.
-  It refuses a skip keyword on any other code commit, the ones outside the loop included.
+  `References-Verdict: not-computed`, which a commit gets when the reference scan could not run. A later amend
+  whose scan runs clean and removes nothing drops that stale `not-computed` (and a stale `Used`), so the push
+  is not blocked for ever. It refuses a skip keyword on any other code commit, the ones outside the loop included.
   Phases 6 and 7 need a passing, fresh proof like any other Claude commit.
 - `prepare-commit-msg` writes `[skip ci]` into the body of a phase 1 to 5 commit: those phases add no
   behaviour, so CI has nothing to test. Never write a skip keyword on phase 6 or 7; `pre-push` refuses it.
@@ -348,6 +351,10 @@ is the user's own words, whole sentences copied from what they typed, never your
 gate checks the quote against the user's stored prompts and answers, typed in this repository after the
 reviewer's latest comment on that thread, and refuses one it cannot find. The record keeps which way it
 came, `chat` or `marks`.
+
+A sentence the user wrote after a line that says no (`not`, `never`, `no`, `dont`, `cant`, `shouldnt`, an
+`n't` word) does not count on its own, because the no may carry across the line break. Quote the whole
+thought, the negative line and the sentence together, or ask the user to restate it as one line.
 
 If their message does not say which comment it answers, ask which one. Never guess: a decision
 recorded against the wrong comment is worse than no decision, because nothing later shows it went
