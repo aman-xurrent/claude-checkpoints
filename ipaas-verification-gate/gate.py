@@ -209,6 +209,8 @@ GATE_LOCK_FILE = GATE_WORKTREE.parent / ".gate.lock"
 CHECKS_LOCK_FILE = CHECKS_WORKTREE.parent / ".checks.lock"
 CHECKS_IN_USE_FILE_NAME = "in_use.json"
 CHECKS_LOCK_TIMEOUT_SECONDS = 1800
+# A reset falls back to the last fetched origin/main rather than wait longer on the network.
+CHECKS_FETCH_TIMEOUT_SECONDS = 120
 
 PROOF_DIRECTORY = Path(".claude/proof")
 DEVIATIONS_PATH = Path(".claude/deviations")
@@ -314,14 +316,17 @@ OWNER_WORDS_EPOCH_FILE = SKIPS_LOG.parent / "owner-words-epoch"
 # has to be given again.
 OWNER_WORDS_KEEP_DAYS = 90
 PRIVATE_FILE_MODE = 0o600
-# Prompts that arrive without the owner typing them. The phase daemon types four shapes into a session window
-# (phased.py resume_brief and the three `line =` sites), and their briefs quote reviewers; another agent's message
-# arrives through the same door. An owner prompt that only mentions a brief path is kept.
+# Prompts that arrive without the owner typing them. phased sends four shapes (phased.py resume_brief and the three
+# `line =` sites) and ticketd sends two (its brief line and its restart header), typed into a session window or
+# passed as the launch prompt. Their briefs quote reviewers. Another agent's message arrives through the same door.
+# An owner prompt that only mentions a brief path is kept.
 MACHINE_PROMPT_SHAPES = re.compile(
     r"^(?:Phase \d+ of PR #\d+ is approved\. Start phase \d+: read @"
     r"|New review feedback on PR #\d+ \(phase \d+\): read @"
     r"|New feedback on PR #\d+ while phase \d+ is still open: read @"
     r"|# Restarting the session for \S+ PR #\d+, phase "
+    r"|ticketd: request \d+, read @"
+    r"|# Restarting the ticketd session for request \d+\b"
     r"|Another Claude session sent a message)")
 # Pasted text arrives inside the prompt, and a pasted reviewer comment is the reviewer's words. The real
 # closing tag carries the same id as the opening one (`</pasted_content id="65c5">`), and a paste the
@@ -333,6 +338,17 @@ QUOTED_BLOCKS = re.compile(r"<(pasted_content|agent-message|task-notification)\b
 # placeholder when the owner typed only a note.
 OWNER_SOURCE_OPTION = "option"
 NOTES_ONLY_ANSWER = "(notes only)"
+OWNER_SOURCE_PROMPT = "prompt"
+# A reply from the owner's phone arrives as a typed prompt that starts with the lead ticketd types:
+# `phone Q2: `, `phone C3: `, `phone P1: ` or `phone ready: `. It is the owner's words only for the question it
+# names, only in the worktree it was typed in, and never for a waiver. A decision that names no question takes
+# only a `Q` reply. On a review comment, `phone C3: R:IN` or `R:OUT` is a tap: a choice, kept as the tap and
+# never as words.
+OWNER_SOURCE_PHONE = "phone"
+PHONE_LEAD = re.compile(r"^phone (?P<question>[QCP]\d+|ready):(?: |$)")
+PHONE_MARK = re.compile(r"^R\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
+# What an `R:IN` or `R:OUT` mark means, drawn on the diagram or tapped on the phone.
+MARK_VERDICTS = {"IN": COMMENT_FIX, "OUT": COMMENT_SEPARATE}
 # Where a sentence starts: after a line break, after a full stop, question or exclamation mark with a space
 # after it (so `2.5` is one word), after a colon or a semicolon, after a dash between spaces, and at a list
 # marker. An owner writes "C4: yes, fix it in this PR." and "- waive this one".
@@ -693,8 +709,9 @@ def run(command, cwd=None, allow_exit_codes=(0,), env=None, timeout=None, input_
     return completed
 
 
-def git(root, *arguments, allow_exit_codes=(0,), input_text=None):
-    return run(["git", "-C", str(root), *arguments], allow_exit_codes=allow_exit_codes, input_text=input_text)
+def git(root, *arguments, allow_exit_codes=(0,), input_text=None, timeout=None):
+    return run(["git", "-C", str(root), *arguments], allow_exit_codes=allow_exit_codes, input_text=input_text,
+               timeout=timeout)
 
 
 def repository_root(start):
@@ -2227,7 +2244,7 @@ def waiver_path(root, digest):
 
 def waiver_for(root, digest):
     record = read_json(waiver_path(root, digest))
-    return record if record and owner_decision_holds(record) else None
+    return record if record and owner_decision_holds(record, phone=False) else None
 
 
 def first_reported(root, digest):
@@ -2422,7 +2439,7 @@ def surface():
     root = repository_root(payload.get("cwd") or os.getcwd())
     if root is None:
         return
-    store_owner_words(payload, "prompt", prompt)
+    store_owner_words(payload, OWNER_SOURCE_PROMPT, prompt, root=root)
     settle_interrupted_runs(root)
     marker_path = proof_directory(root) / SURFACED_MARKER_NAME
     surfaced = set((read_json(marker_path, default=[]) or []))
@@ -2780,15 +2797,23 @@ def skip_once(arguments):
 
 # ------------------------------------------------------------ owner words
 
-def store_owner_words(payload, source, text):
+def store_owner_words(payload, source, text, root=None):
     """Keep what the owner typed, for a later `--evidence` check. A pasted block and the daemon's own lines
-    are not the owner's words. Only the owner can read the file, two sessions cannot interleave a line, and
-    a failure here never stops the hook that called it."""
-    text = QUOTED_BLOCKS.sub(" ", text or "").strip()
-    if not text or MACHINE_PROMPT_SHAPES.match(text):
+    are not the owner's words. A phone reply keeps its question and the worktree root it was typed in, and
+    loses its lead, so the lead can neither pad a short answer nor be quoted. The lead is read before pasted
+    blocks are removed, so a lead that only shows after a paste is no lead. Only the owner can read the file,
+    two sessions cannot interleave a line, and a failure here never stops the hook that called it."""
+    raw = text or ""
+    record = {"at": now_iso(), "source": source, "session": payload.get("session_id"), "cwd": payload.get("cwd")}
+    stripped = raw.lstrip()
+    lead = PHONE_LEAD.match(stripped) if source == OWNER_SOURCE_PROMPT and root is not None else None
+    if lead:
+        record.update(source=OWNER_SOURCE_PHONE, question=lead["question"], worktree=str(real_path(root)))
+        raw = phone_words(record, stripped[lead.end():])
+    text = QUOTED_BLOCKS.sub(" ", raw).strip()
+    if MACHINE_PROMPT_SHAPES.match(text) or not (text or record.get("tap")):
         return
-    record = {"at": now_iso(), "source": source, "session": payload.get("session_id"), "cwd": payload.get("cwd"),
-              "text": text}
+    record["text"] = text
     try:
         append_json_line(OWNER_WORDS_DIRECTORY / f"{record['at'][:DAY_LENGTH]}.jsonl", record)
         prune_owner_words()
@@ -2902,15 +2927,44 @@ def inside_any(cwd, places):
     return bool(cwd) and any(real_path(cwd).is_relative_to(place) for place in places)
 
 
-def owner_said(evidence, root, after=None, before=None):
+def phone_mark(words):
+    """An `R:` mark as (tap, reply): ("IN", None) for a tap, (None, "<text>") for a reply, (None, None) for none."""
+    mark = PHONE_MARK.match((words or "").strip())
+    if not mark:
+        return None, None
+    reply = mark.group(1).strip()
+    return (reply.upper(), None) if reply.upper() in MARK_VERDICTS else (None, reply)
+
+
+def phone_words(record, words):
+    """The words of a phone reply after its lead. On a review comment a tap is kept as the tap, with no words, and
+    any other reply is an instruction, kept without a leading `R:` mark."""
+    if not record["question"].startswith("C"):
+        return words
+    tap, reply = phone_mark(words)
+    if tap:
+        record["tap"] = tap
+        return ""
+    return words if reply is None else reply
+
+
+def owner_said(evidence, root, after=None, before=None, phone=False):
     """True when the owner typed these words as whole sentences, in this repository, inside the window, and
     the gate had not printed them first. `after` is what the decision answers; `before` is when it was
     recorded. An option label in a question dialog is the session's text and never counts."""
+    return matching_record(evidence, root, after, before, phone) is not None
+
+
+def matching_record(evidence, root, after=None, before=None, phone=False, question=None):
+    """The stored record that holds the evidence as the owner's words, or None. A phone lead on the evidence is
+    removed first, so "phone Q2: yes" is three characters, not thirteen."""
+    evidence = PHONE_LEAD.sub("", (evidence or "").strip())
     quote = comparable(evidence)
     if evidence_length(evidence) < EVIDENCE_MINIMUM_CHARACTERS or quote.endswith("?"):
-        return False
+        return None
     places = [real_path(place) for place in repository_worktrees(root)]
-    return any(owner_typed(record, quote, places, after, before) for record in owner_words())
+    return next((record for record in owner_words()
+                 if owner_typed(record, quote, root, places, after, before, phone, question)), None)
 
 
 def evidence_length(evidence):
@@ -2921,13 +2975,31 @@ def evidence_length(evidence):
     return len(text.strip(EVIDENCE_PADDING))
 
 
-def owner_typed(record, quote, places, after, before):
+def owner_typed(record, quote, root, places, after, before, phone=False, question=None):
     """Whether this record holds the quote as the owner's own words. An option label is the session's text."""
     if record.get("source") == OWNER_SOURCE_OPTION or not inside_window(record, after, before):
         return False
-    if not inside_any(record.get("cwd"), places) or not says_whole(record.get("text"), quote):
+    if not typed_where_it_counts(record, root, places, phone, question) or not says_whole(record.get("text"), quote):
         return False
     return not gate_printed(quote, before=record.get("at"))
+
+
+def typed_where_it_counts(record, root, places, phone, question):
+    """Keyboard words count in every worktree of the repository. A phone reply counts only where the caller
+    allows phone words, only in the worktree it was typed in, and only for the question named. With no question
+    named, only a `Q` reply counts: a permission approval or a comment reply backs nothing else. A tap is a
+    choice and never counts as words."""
+    if record.get("source") != OWNER_SOURCE_PHONE:
+        return inside_any(record.get("cwd"), places)
+    if not phone or record.get("tap"):
+        return False
+    asked = record.get("question") or ""
+    fits = asked == question if question else asked.startswith("Q")
+    return fits and typed_in(record, root)
+
+
+def typed_in(record, root):
+    return bool(record.get("worktree")) and real_path(record["worktree"]) == real_path(root)
 
 
 def printed_texts():
@@ -2970,27 +3042,36 @@ def grandfathered_decisions():
     return memoized(("grandfathered",), lambda: set(read_json(GRANDFATHERED_DECISIONS_FILE, default=[]) or []))
 
 
-def owner_decision_holds(record):
+def owner_decision_holds(record, phone=False):
     """A later decision must still quote the owner, in the worktree it was recorded in, inside the window it was
     recorded with. One dated before the store went live holds only when it is on the list taken when it went
-    live: a record anyone can write must not excuse itself by its own date."""
+    live: a record anyone can write must not excuse itself by its own date. `phone` says whether a phone reply
+    may back this kind of decision; each caller states it."""
     recorded_at = record.get("recorded_at") or ""
     if recorded_before(record, owner_words_epoch()):
         return decision_digest(record) in grandfathered_decisions()
     if not record.get("worktree"):
         return False
     return owner_said(record.get("evidence"), Path(record["worktree"]), after=record.get("evidence_after"),
-                      before=recorded_at)
+                      before=recorded_at, phone=phone)
 
 
-def owner_evidence_problem(evidence, root, after=None):
-    if owner_said(evidence, root, after=after):
+def owner_evidence_problem(evidence, root, after=None, phone=False):
+    if owner_said(evidence, root, after=after, phone=phone):
         return None
+    if not phone and owner_said(evidence, root, after=after, phone=True):
+        return "--evidence came from the owner's phone, and this decision must be typed at the keyboard."
+    return owner_words_refusal(after)
+
+
+def owner_words_refusal(after):
     return ("--evidence must be the owner's own words: whole sentences copied from what they typed in this repository"
             + (f" after {after}" if after else "") + f", at least {EVIDENCE_MINIMUM_CHARACTERS} characters. "
             "Those words are not in the owner's prompts or answers. Quote from the start of a sentence or a line "
             "to its end. A question, your summary, the gate's own text, a pasted block and an option label you wrote "
-            "do not count. Ask the owner, and record their answer once they give it.")
+            "do not count. A phone reply counts only for the question its `phone <id>: ` lead names, only in the "
+            "worktree it was typed in, and the lead is not the owner's words. Ask the owner, and record their answer "
+            "once they give it.")
 
 
 def answers():
@@ -3511,28 +3592,37 @@ def finalize(arguments):
 
 def tool_checks_in_checks_worktree(root, paths, run_specs):
     """rubocop, yarn and specs run against the branch state applied to the checks worktree, which is
-    returned to origin/main afterwards whatever happened."""
+    returned to origin/main afterwards unless another worktree holds it."""
     if root.resolve() == CHECKS_WORKTREE.resolve():
         return [("checks", "FAIL", "finalize runs from the PR worktree, not from the checks worktree")]
     if not checks_ready():
         return [("checks", "FAIL", f"no checks worktree with a slot at {CHECKS_WORKTREE}; run gate.py setup-checks")]
     checks = []
-    with checks_lock():
-        try:
-            checks += apply_branch_to_checks(root)
-            if all(status == "ok" for _, status, _ in checks):
-                checks += rubocop_checks(CHECKS_WORKTREE, paths)
-                checks += javascript_checks(CHECKS_WORKTREE, paths)
-                if run_specs:
-                    checks += spec_checks(CHECKS_WORKTREE, paths)
+    try:
+        with checks_lock():
+            refusal = checks_in_use_refusal(root, checks_in_use())
+            if refusal:
+                return [("checks", "FAIL", refusal)]
+            try:
+                checks += apply_branch_to_checks(root)
+                if all(status == "ok" for _, status, _ in checks):
+                    checks += rubocop_checks(CHECKS_WORKTREE, paths)
+                    checks += javascript_checks(CHECKS_WORKTREE, paths)
+                    if run_specs:
+                        checks += spec_checks(CHECKS_WORKTREE, paths)
+                    else:
+                        checks.append(("specs", "skip", "this phase does not run specs"))
                 else:
-                    checks.append(("specs", "skip", "this phase does not run specs"))
-            else:
-                checks.append(("checks", "skip", "the checks worktree could not take the branch state"))
-        except RuntimeError as error:
-            checks.append(("checks", "FAIL", str(error)))
-        finally:
-            checks += reset_checks_worktree()
+                    checks.append(("checks", "skip", "the checks worktree could not take the branch state"))
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                checks.append(("checks", "FAIL", str(error)))
+            finally:
+                try:
+                    checks += reset_checks_worktree()
+                except (RuntimeError, subprocess.TimeoutExpired) as error:
+                    checks.append(("reset", "FAIL", f"{error}\nrun gate.py checks reset from this worktree"))
+    except ChecksLockTimeout as error:
+        checks.append(("checks", "FAIL", str(error)))
     return checks
 
 
@@ -3772,7 +3862,7 @@ def excused_by(box, deviations):
         if record.get("kind") in RECORD_ONLY_KINDS:
             continue
         if (record.get("decided_by") == "user" and region and inside_region(box, region)
-                and owner_decision_holds(record)):
+                and owner_decision_holds(record, phone=True)):
             return record["id"]
     return None
 
@@ -3991,7 +4081,8 @@ def owner_decision_problems(record):
     if record["region"] and not record["evidence_after"]:
         return ["--region excuses a difference figma-compare reported, and it has reported none in this worktree. "
                 "Run figma-compare first, then record the owner's answer to what it reports."]
-    problem = owner_evidence_problem(record["evidence"], Path(record["worktree"]), after=record["evidence_after"])
+    problem = owner_evidence_problem(record["evidence"], Path(record["worktree"]), after=record["evidence_after"],
+                                     phone=True)
     return [problem + " Only a decision the owner made lets a mismatch pass."] if problem else []
 
 
@@ -4139,11 +4230,18 @@ def guard_bash(command, cwd=None, depth=0):
         return ("an inline program that writes the gate's state forges it, whatever the path looks like. Read the "
                 "state with the Read tool, `json.load`, or a gate.py subcommand (`trace`, `units`, `checks`).")
     directory, directories = Path(cwd or os.getcwd()), []
+    # A heredoc is text the raw check read only when bash leaves it as typed: a quoted tag, or a body with no
+    # expansion in it.
+    heredoc_fed = {heredoc.segment for heredoc in scan.heredocs
+                   if heredoc.terminated and (heredoc.quoted or not re.search(r"[$`]", heredoc.body))}
     for index, (segment, words) in enumerate(segments):
         directories.append(directory)
         nested_texts = shell_program_text(words) + [shlex.join(block) for block in find_exec_blocks(words)]
         nested += [(index, text) for text in nested_texts]
-        reason = guard_program(words)
+        literal_stdin = index in heredoc_fed and stdin_is_the_heredoc(segment.split())
+        reason = (guard_program(words)
+                  or guard_loop_ready(words, literal_stdin, fed_by_xargs(segment), bool(re.search(r"\bgh\b", command)))
+                  or guard_tmux(words, "tmux" in command))
         if reason:
             return reason
         directory = segment_directory(words, directory)
@@ -4565,8 +4663,9 @@ def program_words(words):
 
 def expand_word(word, variables):
     def replacement(match):
-        return variables.get(match.group(1), os.environ.get(match.group(1), match.group(0)))
-    word = re.sub(r"\$\{?(\w+)\}?", replacement, word)
+        name = match.group(1) or match.group(2)
+        return variables.get(name, os.environ.get(name, match.group(0)))
+    word = re.sub(r"\$(\w+)|\$\{(\w+)\}", replacement, word)
     name, equals, value = word.partition("=")
     if equals and SHELL_ASSIGNMENT.match(word):
         return f"{name}={os.path.expanduser(value)}"
@@ -4824,6 +4923,216 @@ def guard_allowed_invocation(words):
 
 READY_COMMAND = re.compile(r"\bgh\s+pr\s+ready\b")
 READY_MUTATION = re.compile(r"markPullRequestReadyForReview")
+# ticketd starts every loop session with this variable set to 1, and the hooks of that session inherit it.
+LOOP_SESSION_VARIABLE = "TICKETD_SESSION"
+DRAFT_MUTATIONS = re.compile(r"markPullRequestReadyForReview|convertPullRequestToDraft|createPullRequest|revertPullRequest")
+# In a loop session the raw command text is searched too, so a program written inline (python -c, ruby -e, awk)
+# or a heredoc body cannot carry these past the word check.
+LOOP_DRAFT_TEXT = re.compile(r"\bgh\s+(?:pr\s+(?:ready|create|new|revert)|alias\s+(?:set|import))\b|"
+                             + DRAFT_MUTATIONS.pattern)
+# The gh subcommands a loop session never runs: draft state, pull request creation (`new` is gh's alias for
+# `create`), and aliases that could rename either.
+LOOP_REFUSED_SUBCOMMANDS = {"pr": ("ready", "create", "new", "revert"), "alias": ("set", "import")}
+# Options that take the next word as their value, so a value is never read as a subcommand, an endpoint or a method.
+GH_VALUE_OPTIONS = ("-R", "--repo", "-X", "--method", "-f", "-F", "--field", "--raw-field", "-H", "--header",
+                    "--input", "-q", "--jq", "-t", "--template", "--hostname", "-p", "--preview", "--cache")
+GH_API_FIELD_OPTIONS = ("-f", "-F", "--field", "--raw-field", "--input")
+# Only these options read a value from a file (`key=@path`); `-f` sends `@` literally.
+GH_API_FILE_FIELD_OPTIONS = ("-F", "--field")
+# `-i` is the only true-or-false short option of `gh api`, so only a run of it can come before a short option
+# that takes a value: `-iF query=@file` is `-i -F query=@file`.
+GH_API_SHORT_FLAGS = "i"
+PULLS_COLLECTION = re.compile(r"(?:^|/)pulls/?(?:[?#].*)?$")
+# gh fills these placeholders in an endpoint itself; they are not shell words.
+GH_ENDPOINT_PLACEHOLDERS = re.compile(r"\{(?:owner|repo|branch)\}")
+# A GraphQL query whose whole text is a shell variable, which the guard cannot read. A query that only uses
+# GraphQL variables (`query($owner:String!)`) does not start with `$`.
+VARIABLE_QUERY_FIELD = re.compile(r"^query=\$")
+LOOP_READY_REASON = ("in a ticketd loop session only ticketd moves a pull request in or out of draft, after the "
+                     "user's signed \"ready\" from the phone. Do not run `gh pr ready`, a draft mutation or a gh "
+                     "alias, and open a pull request only with `.claude/bin/pr-create`, which opens a draft. A gh api "
+                     "request goes inline, never from a file or from --input. End your turn: ticketd pings the user "
+                     "when CI is green.")
+
+
+def in_loop_session():
+    return os.environ.get(LOOP_SESSION_VARIABLE) == "1"
+
+
+def unreadable(word):
+    """A word the shell fills only when it runs: a substitution, or a variable the guard has no value for."""
+    return SUBSTITUTION_PLACEHOLDER in word or "$" in word
+
+
+def fed_by_xargs(segment):
+    """Whether xargs runs this segment's program, so part of its words arrive only when it runs."""
+    try:
+        words = shlex.split(segment.strip().lstrip("(").rstrip(")"))
+    except ValueError:
+        words = segment.split()
+    return any(Path(word).name == "xargs" for word in words)
+
+
+def gh_positionals(words):
+    """The words of a `gh` call that are not options, so `gh pr -R 4me/ipaas ready 5` reads `pr ready 5`."""
+    positionals, position = [], 1
+    while position < len(words):
+        word = words[position]
+        position += 2 if word in GH_VALUE_OPTIONS else 1
+        if not word.startswith("-"):
+            positionals.append(word)
+    return positionals
+
+
+def guard_loop_ready(words, literal_stdin=False, xargs=False, names_gh=True):
+    """The gh calls a loop session never makes, read from words that are already unquoted, expanded and
+    stripped of wrappers, so `gh pr "ready"` and `env gh pr -R x ready` are the same call. A subcommand the
+    shell fills only at run time is refused, because the guard cannot read it, and so is a gh call that xargs
+    completes. `literal_stdin` says a heredoc in this command, whose text the raw check read, is the call's
+    standard input. `names_gh` says the command text names gh, so a program word the shell fills
+    (`$(which gh)`) is judged as gh.
+
+    The guard is a tripwire for ordinary spellings, not a wall. It does not read a script file the session wrote,
+    a call built as a list inside an inline program, another HTTP client, a gh extension or an alias set before
+    the session, or a variable that `export`, `declare` or `read` fills. ticketd watches the draft state of every
+    loop pull request itself and undoes a change the user did not sign."""
+    if not in_loop_session() or not words:
+        return None
+    words = without_redirects(words)
+    program = Path(words[0]).name if words else ""
+    if program != "gh" and not (names_gh and unreadable(program)):
+        return None
+    positionals = gh_positionals(words)
+    group, command = (positionals + ["", ""])[:2]
+    if unreadable(group):
+        return LOOP_READY_REASON
+    if xargs and (len(positionals) < 2 or not re.fullmatch(r"[a-z-]+", group) or not re.fullmatch(r"[a-z-]+", command)):
+        return LOOP_READY_REASON
+    refused = LOOP_REFUSED_SUBCOMMANDS.get(group, ())
+    if refused and (command in refused or unreadable(command)):
+        return LOOP_READY_REASON
+    if DRAFT_MUTATIONS.search(" ".join(words)):
+        return LOOP_READY_REASON
+    if group == "api" and (api_reads_a_file(words, literal_stdin) or api_creates_a_pull_request(words)):
+        return LOOP_READY_REASON
+    return None
+
+
+def api_reads_a_file(words, literal_stdin=False):
+    """A `gh api` call whose request text the guard cannot read: `--input`, a `-F` value read from a file, standard
+    input that no literal heredoc feeds, a whole word or a field value the shell fills by substitution, or a query
+    held in a shell variable."""
+    for index, word in enumerate(words):
+        if word == "--input" or word.startswith("--input=") or word.startswith(SUBSTITUTION_PLACEHOLDER):
+            return True
+        field = option_value(words, index, GH_API_FIELD_OPTIONS)
+        if field is not None and (SUBSTITUTION_PLACEHOLDER in field or VARIABLE_QUERY_FIELD.match(field)):
+            return True
+        value = option_value(words, index, GH_API_FILE_FIELD_OPTIONS)
+        if value is not None and "=@" in value and not (value.endswith("=@-") and literal_stdin):
+            return True
+    return False
+
+
+def option_value(words, index, options):
+    """The value of the option at `index` when it is one of `options`, or None when the word is not that option.
+    It reads every spelling gh accepts: `-F x`, `-Fx`, `-F=x`, `-iF x`, `--field x` and `--field=x`."""
+    word = words[index]
+    following = words[index + 1] if index + 1 < len(words) else ""
+    for option in options:
+        if option.startswith("--"):
+            if word == option:
+                return following
+            if word.startswith(option + "="):
+                return word[len(option) + 1:]
+            continue
+        short = re.fullmatch(rf"-[{GH_API_SHORT_FLAGS}]*{re.escape(option[1:])}(.*)", word, re.DOTALL)
+        if short:
+            return short.group(1).removeprefix("=") or following
+    return None
+
+
+def api_creates_a_pull_request(words):
+    """A `gh api` write to the pulls collection, or to an endpoint the shell fills at run time, which can open a
+    pull request that need not be a draft. gh's own `{owner}` and `{repo}` placeholders are not shell words."""
+    endpoints = [GH_ENDPOINT_PLACEHOLDERS.sub("", word) for word in gh_positionals(words)[1:]]
+    return any(PULLS_COLLECTION.search(word) or unreadable(word) for word in endpoints) and api_writes(words)
+
+
+def api_writes(words):
+    """gh sends a POST when a field is given and no method is."""
+    method = api_method(words)
+    has_field = any(option_value(words, index, GH_API_FIELD_OPTIONS) is not None for index in range(len(words)))
+    return method not in (None, "GET") or (method is None and has_field)
+
+
+def api_method(words):
+    """The method of a `gh api` call, or None when it is not given. gh keeps the last one, and the value of another
+    option (`--jq -XGET`) is never a method."""
+    method, position = None, 1
+    while position < len(words):
+        word = words[position]
+        value = option_value(words, position, ("-X", "--method"))
+        if value is not None:
+            method = value.upper()
+            position += 2 if word in ("-X", "--method") or re.fullmatch(rf"-[{GH_API_SHORT_FLAGS}]*X", word) else 1
+        else:
+            position += 2 if word in GH_VALUE_OPTIONS else 1
+    return method
+
+
+TMUX_READ_COMMANDS = frozenset({"display-message", "display", "list-windows", "lsw", "list-panes", "lsp",
+                                "list-sessions", "ls", "capture-pane", "capturep", "has-session", "has",
+                                "show-options", "show"})
+# The tmux options that take the next word as their value, also at the end of a group such as `-uT`.
+TMUX_VALUE_OPTION_LETTERS = "LSfcT"
+# A format that runs a shell command (`#(...)`) or applies a modifier (`#{E:...}`); a plain `#{name}` only reads.
+TMUX_PLAIN_FORMAT = re.compile(r"##|#\{\w+\}")
+TMUX_RUNNING_FORMAT = re.compile(r"#[({]")
+TMUX_REASON = ("a session only reads tmux (display-message, the list commands, capture-pane, has-session, "
+               "show-options) with plain #{name} formats. Typing into a pane or a paste buffer writes a prompt that "
+               "the gate stores as the owner's words, and a #() format runs a shell command.")
+
+
+def guard_tmux(words, names_tmux=False):
+    """tmux can type into the session's own pane, and the gate would store that text as the owner's words:
+    send-keys under any prefix or alias, a paste buffer, run-shell, a command file, control mode, or a `#()`
+    format inside a command that otherwise reads. So a session runs only the commands that read, with plain
+    formats. `names_tmux` says the command text names tmux, so a program word the shell fills (`$(which tmux)`)
+    is judged as tmux."""
+    if not words:
+        return None
+    program = Path(words[0]).name
+    if program != "tmux" and not (names_tmux and unreadable(program)):
+        return None
+    if any(TMUX_RUNNING_FORMAT.search(TMUX_PLAIN_FORMAT.sub("", word)) for word in words[1:]):
+        return TMUX_REASON
+    position = 1
+    while position < len(words) and words[position].startswith("-"):
+        if "C" in words[position]:
+            return TMUX_REASON
+        position += 2 if words[position][-1] in TMUX_VALUE_OPTION_LETTERS else 1
+    commands, expecting = [], True
+    for word in words[position:]:
+        if expecting:
+            commands.append(word)
+            expecting = False
+        if word.endswith(";"):
+            expecting = True
+    if not commands or any(command not in TMUX_READ_COMMANDS for command in commands):
+        return TMUX_REASON
+    return None
+
+
+def stdin_is_the_heredoc(words):
+    """No redirect in the segment replaces standard input (`<`, `0<`, `<>`, `<&`, a here-string), and no heredoc
+    feeds a descriptor other than 0. The words are the raw segment split on spaces, quotes still in them."""
+    for position, word in enumerate(words):
+        if re.match(r"0?<(?!<)|\d*<>|<<<|[1-9]\d*<<", word):
+            return False
+        if word.startswith("<<") and position and re.fullmatch(r"[1-9]\d*", words[position - 1]):
+            return False
+    return True
 
 
 def guard_ready(command):
@@ -4831,6 +5140,8 @@ def guard_ready(command):
 
     A session shipped a whole page and wrote "Never seen rendered: all of it", then made it
     reviewable anyway, because the live check was a checkbox in a skill and nothing read it."""
+    if in_loop_session() and LOOP_DRAFT_TEXT.search(command):
+        return LOOP_READY_REASON
     if not (READY_COMMAND.search(command) or READY_MUTATION.search(command)):
         return None
     root = repository_root(os.getcwd())
@@ -5077,6 +5388,41 @@ def checks_in_use_path():
     return CHECKS_WORKTREE / PROOF_DIRECTORY / CHECKS_IN_USE_FILE_NAME
 
 
+def checks_in_use():
+    return read_json(checks_in_use_path()) or {}
+
+
+class ChecksLockTimeout(RuntimeError):
+    """The checks lock was never taken, so the checks worktree was never touched."""
+
+
+def checks_holder_gone(in_use):
+    """Why the holder of the checks worktree cannot come back, or None while it can: the machine restarted, or
+    its folder is no longer the top of a worktree."""
+    if survived_a_restart(in_use):
+        return "at the restart"
+    source = in_use.get("source_root")
+    if source:
+        top = repository_root(source) if Path(source).is_dir() else None
+        if top is None or real_path(top) != real_path(source):
+            return f"when {source} stopped being a worktree"
+    return None
+
+
+def checks_in_use_refusal(root, in_use):
+    """Why a caller in worktree `root` may not touch the checks worktree, or None when it may. The holder is
+    the worktree that applied, compared as a real path, because every detached worktree reports the branch
+    HEAD. `root` is None for a caller outside any PR worktree, which holds nothing."""
+    if not in_use or checks_holder_gone(in_use):
+        return None
+    source = in_use.get("source_root")
+    if root is not None and source and real_path(root) == real_path(source):
+        return None
+    return (f"the checks worktree is in use by {in_use.get('branch')} from {in_use.get('source_root')} since "
+            f"{in_use.get('at')}; wait until gate.py checks status prints free, then run this again. Only a session "
+            f"working in {in_use.get('source_root')} runs gate.py checks reset for it")
+
+
 @contextlib.contextmanager
 def checks_lock():
     CHECKS_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -5088,7 +5434,7 @@ def checks_lock():
                 break
             except BlockingIOError:
                 if waited >= CHECKS_LOCK_TIMEOUT_SECONDS:
-                    raise RuntimeError(f"the checks worktree stayed locked for {CHECKS_LOCK_TIMEOUT_SECONDS} seconds")
+                    raise ChecksLockTimeout(f"the checks worktree stayed locked for {CHECKS_LOCK_TIMEOUT_SECONDS} seconds")
                 time.sleep(5)
                 waited += 5
         try:
@@ -5097,23 +5443,19 @@ def checks_lock():
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def current_branch(root):
-    return git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-
-
 def migrations_in(root, base):
     return any(path.startswith(MIGRATIONS_DIRECTORY) for path in changed_files_all(root, base))
 
 
 def apply_branch_to_checks(root):
     """Put the checks worktree into the exact state of root: its HEAD commit plus its working tree."""
-    in_use = read_json(checks_in_use_path()) or {}
+    in_use = checks_in_use()
+    refusal = checks_in_use_refusal(root, in_use)
+    if refusal:
+        raise RuntimeError(refusal)
     branch = current_branch(root)
-    taken_over = None
-    if in_use and in_use.get("branch") != branch:
-        if not survived_a_restart(in_use):
-            raise RuntimeError(f"the checks worktree is in use by {in_use.get('branch')} since {in_use.get('at')}; finish there, then gate.py checks reset")
-        taken_over = in_use.get("branch")
+    source = in_use.get("source_root")
+    left = None if source and real_path(source) == real_path(root) else checks_holder_gone(in_use)
     head = git(root, "rev-parse", "HEAD").stdout.strip()
     git(CHECKS_WORKTREE, "checkout", "--detach", "--force", "--quiet", head)
     git(CHECKS_WORKTREE, "reset", "--hard", "--quiet")
@@ -5130,8 +5472,9 @@ def apply_branch_to_checks(root):
                                       "patch_sha": patch_digest(patch), "migrations": migrations,
                                       "at": now_iso(), "boot": boot_time()})
     steps = [("apply", "ok", f"{branch} at {head[:10]} plus {len(patch.splitlines())} patch line(s) in {CHECKS_WORKTREE}")]
-    if taken_over:
-        steps.insert(0, ("takeover", "ok", f"{taken_over} left the checks worktree at the restart; taking it over"))
+    if left:
+        steps.insert(0, ("takeover", "ok", f"{in_use.get('branch')} from {in_use.get('source_root')} left the checks "
+                                           f"worktree {left}; taking it over"))
     platform = CHECKS_WORKTREE / "platform"
     if migrations:
         steps.append(command_check("db:test:prepare", ["bundle", "exec", "rake", "db:test:prepare"], platform, environment=checks_test_environment()))
@@ -5143,13 +5486,19 @@ def apply_branch_to_checks(root):
 def reset_checks_worktree(rebuild_dev_db=False):
     """Back to a clean origin/main. The test database is reloaded when the branch carried migrations;
     the development database is rebuilt only on request, because that reseeds the demo data."""
-    in_use = read_json(checks_in_use_path()) or {}
-    git(CHECKS_WORKTREE, "fetch", "--quiet", "origin", "main")
+    in_use = checks_in_use()
+    fetch_failure = None
+    try:
+        git(CHECKS_WORKTREE, "fetch", "--quiet", "origin", "main", timeout=CHECKS_FETCH_TIMEOUT_SECONDS)
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        fetch_failure = "; ".join(str(error).strip().splitlines()[:2])
     git(CHECKS_WORKTREE, "checkout", "--detach", "--force", "--quiet", UPSTREAM_BRANCH)
     git(CHECKS_WORKTREE, "reset", "--hard", "--quiet")
     git(CHECKS_WORKTREE, "clean", "-fd", "--quiet")
     platform = CHECKS_WORKTREE / "platform"
     steps = []
+    if fetch_failure:
+        steps.append(("fetch", "skip", f"reset to the last fetched {UPSTREAM_BRANCH}: {fetch_failure}"))
     if in_use.get("migrations"):
         steps.append(command_check("db:test:prepare (reset)", ["bundle", "exec", "rake", "db:test:prepare"], platform, environment=checks_test_environment()))
     if rebuild_dev_db:
@@ -5194,38 +5543,53 @@ def checks(arguments):
         print(f"no checks worktree with a slot at {CHECKS_WORKTREE}; run gate.py setup-checks")
         sys.exit(1)
     if arguments[0] == "status":
-        in_use = read_json(checks_in_use_path())
+        in_use = checks_in_use()
         head = git(CHECKS_WORKTREE, "rev-parse", "--short", "HEAD").stdout.strip()
         dirty = git(CHECKS_WORKTREE, "status", "--porcelain").stdout.strip()
         values = environment_file_values(CHECKS_WORKTREE / WORKTREE_ENVIRONMENT_FILE)
         print(f"{CHECKS_WORKTREE}: HEAD {head}, {'dirty' if dirty else 'clean'}, slot {values.get('IPAAS_WT_SLOT')}, web port {values.get('WEB_PORT')}")
+        left = checks_holder_gone(in_use)
         if not in_use:
             print("free")
-        elif survived_a_restart(in_use):
-            print(f"marked in use by {in_use['branch']} since {in_use['at']}, but that was before the last restart; "
+        elif left:
+            print(f"marked in use by {in_use['branch']} from {in_use.get('source_root')} since {in_use['at']}, but "
+                  f"its holder left {left}; "
                   "the next apply takes it over")
         else:
-            print(f"in use by {in_use['branch']} since {in_use['at']}")
+            print(f"in use by {in_use['branch']} from {in_use.get('source_root')} since {in_use['at']}")
         return
-    with checks_lock():
-        if arguments[0] == "apply":
-            root = repository_root(os.getcwd())
-            if root is None or root.resolve() == CHECKS_WORKTREE.resolve():
-                print("run gate.py checks apply from the PR worktree")
-                sys.exit(2)
+    root = repository_root(os.getcwd())
+    caller = None if root is None or root.resolve() == CHECKS_WORKTREE.resolve() else root
+    try:
+        with checks_lock():
+            if arguments[0] == "apply":
+                if caller is None:
+                    print("run gate.py checks apply from the PR worktree")
+                    sys.exit(2)
+                try:
+                    steps = apply_branch_to_checks(caller)
+                except RuntimeError as error:
+                    print(f"checks apply refused: {error}")
+                    sys.exit(1)
+                print_steps(steps)
+                values = environment_file_values(CHECKS_WORKTREE / WORKTREE_ENVIRONMENT_FILE)
+                print(f"live check: cd {CHECKS_WORKTREE} && source {WORKTREE_ENVIRONMENT_FILE} && cd platform && bin/dev   then open http://127.0.0.1:{values.get('WEB_PORT')}")
+                print("when done: gate.py checks reset  (add --rebuild-dev-db after exploratory migrations)")
+                sys.exit(1 if any(status == "FAIL" for _, status, _ in steps) else 0)
+            refusal = checks_in_use_refusal(caller, checks_in_use())
+            if refusal:
+                print(f"checks reset refused: {refusal}")
+                sys.exit(1)
             try:
-                steps = apply_branch_to_checks(root)
-            except RuntimeError as error:
-                print(f"checks apply refused: {error}")
+                steps = reset_checks_worktree(rebuild_dev_db="--rebuild-dev-db" in arguments)
+            except (RuntimeError, subprocess.TimeoutExpired) as error:
+                print(f"checks reset failed: {error}")
                 sys.exit(1)
             print_steps(steps)
-            values = environment_file_values(CHECKS_WORKTREE / WORKTREE_ENVIRONMENT_FILE)
-            print(f"live check: cd {CHECKS_WORKTREE} && source {WORKTREE_ENVIRONMENT_FILE} && cd platform && bin/dev   then open http://127.0.0.1:{values.get('WEB_PORT')}")
-            print("when done: gate.py checks reset  (add --rebuild-dev-db after exploratory migrations)")
             sys.exit(1 if any(status == "FAIL" for _, status, _ in steps) else 0)
-        steps = reset_checks_worktree(rebuild_dev_db="--rebuild-dev-db" in arguments)
-        print_steps(steps)
-        sys.exit(1 if any(status == "FAIL" for _, status, _ in steps) else 0)
+    except ChecksLockTimeout as error:
+        print(f"checks {arguments[0]} refused: {error}")
+        sys.exit(1)
 
 
 # ----------------------------------------------------------------- setup
@@ -6038,26 +6402,47 @@ def comment_fetch(arguments):
         refuse("comment-triage fetch", [f"the thread query failed: {done.stderr.strip()[:300]}"])
     payload = json.loads(done.stdout or "{}")
     nodes = (((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("reviewThreads", {}).get("nodes", [])
-    threads = [thread_record(index, node) for index, node in enumerate(
-        [node for node in nodes if not node.get("isResolved")], start=1)]
+    threads = [thread_record(node) for node in nodes if not node.get("isResolved")]
 
     directory = comments_directory(root, pr)
     directory.mkdir(parents=True, exist_ok=True)
-    previous = {each["id"]: each for each in (read_json(directory / "threads.json", default={}) or {}).get("threads", [])}
+    stored = read_json(directory / "threads.json", default={}) or {}
+    previous = {each["id"]: each for each in stored.get("threads", [])}
+    fetched_at = now_iso()
+    issued = issue_tokens(threads, stored, fetched_at)
     for thread in threads:
         was = previous.get(thread["id"])
         thread["reopened"] = bool(was and was.get("latest_at") and thread["latest_at"] > was["latest_at"])
-    write_json(directory / "threads.json", {"pr": pr, "fetched_at": now_iso(), "threads": threads})
-    write_json(comment_pointer(root), {"pr": pr, "updated_at": now_iso()})
+    write_json(directory / "threads.json", {"pr": pr, "fetched_at": fetched_at, "threads": threads, "issued": issued})
+    write_json(comment_pointer(root), {"pr": pr, "updated_at": fetched_at})
     drop_stale_decisions(root, pr, threads)
     print_thread_list(pr, threads, decisions_of(root, pr))
 
 
-def thread_record(index, node):
+def issue_tokens(threads, stored, now):
+    """Give every thread the token it had before, and a new thread the next unused number. A token never moves
+    to another thread of the pull request, so `C3` in a reply means the thread that was C3 when the question
+    was drawn, however many fetches came between. Each token also keeps when it was first given out
+    (`token_since`): a phone reply typed before then names the same token on another pull request in this
+    worktree, or in a store that was emptied."""
+    issued = {each["id"]: {"token": each["token"], "since": each.get("token_since")}
+              for each in stored.get("threads", [])}
+    issued.update(stored.get("issued", {}))
+    number = max([int(entry["token"][1:]) for entry in issued.values()] or [0])
+    for thread in threads:
+        if thread["id"] not in issued:
+            number += 1
+            issued[thread["id"]] = {"token": f"C{number}", "since": now}
+        entry = issued[thread["id"]]
+        entry["since"] = entry.get("since") or now
+        thread["token"], thread["token_since"] = entry["token"], entry["since"]
+    return issued
+
+
+def thread_record(node):
     comments = (node.get("comments") or {}).get("nodes") or []
     first = comments[0] if comments else {}
     return {
-        "token": f"C{index}",
         "id": node["id"],
         "path": node.get("path"),
         "line": node.get("line") or node.get("startLine"),
@@ -6190,8 +6575,7 @@ def comment_decide_from_chat(root, pr, threads, arguments):
     if verdict not in COMMENT_VERDICTS:
         problems.append(f"--verdict must be one of {', '.join(COMMENT_VERDICTS)}")
     if token in by_token:
-        # The words answer the reviewer's latest comment on the thread, so they cannot come before it.
-        evidence_problem = owner_evidence_problem(evidence, root, after=by_token[token].get("latest_at") or None)
+        source, evidence_problem = comment_evidence(evidence, root, by_token[token], verdict)
         if evidence_problem:
             problems.append(evidence_problem)
     if problems:
@@ -6202,12 +6586,74 @@ def comment_decide_from_chat(root, pr, threads, arguments):
     decisions[thread["id"]] = {
         "token": token, "verdict": verdict, "instruction": note or evidence,
         "path": thread["path"], "line": thread["line"], "decided_at": now_iso(),
-        "source": "chat", "evidence": evidence}
+        "source": source, "evidence": evidence}
     write_json(comments_directory(root, pr) / "decisions.json", decisions)
     print(f"comment-triage: recorded {token} as {verdict} from what the user said.")
     print(f'  their words: "{evidence.strip()[:160]}"')
     undecided = [each["token"] for each in threads if each["id"] not in decisions]
     print(f"  still waiting: {', '.join(undecided)}" if undecided else "  every thread has a decision.")
+
+
+def comment_evidence(evidence, root, thread, verdict):
+    """Where a chat decision's evidence came from (`chat` or `phone`), and why it does not hold, or None.
+
+    Keyboard words answer the reviewer's latest comment, so they cannot come before it, nor before a newer phone
+    reply on the same comment. A phone reply names its token, so it also cannot come before the token was given
+    to this thread, and it counts only while it is the newest phone reply for that token. A tap (`R:IN` from
+    `phone C3: R:IN`) is checked by its record, never by its words: four characters are a choice, not a quote.
+    Any other phone reply on a comment is an instruction, the same rule an `R:<text>` mark on the drawing
+    follows. A reply to another question never decides a comment."""
+    after = thread.get("latest_at") or None
+    since = max(filter(None, (after, thread.get("token_since"))), default=None)
+    stripped = (evidence or "").strip()
+    lead = PHONE_LEAD.match(stripped)
+    if lead and lead["question"] != thread["token"]:
+        return OWNER_SOURCE_PHONE, f"the evidence is a phone reply for {lead['question']}, not {thread['token']}"
+    words = stripped[lead.end():] if lead else stripped
+    tap, reply = phone_mark(words)
+    if tap:
+        return OWNER_SOURCE_PHONE, phone_tap_problem(root, thread["token"], verdict, tap, since)
+    newest = newest_phone_reply(root, thread["token"], since)
+    # Keyboard words count only when typed after the newest phone reply, so a second later at the earliest.
+    keyboard_after = one_second_after(newest["at"]) if newest else after
+    if any(owner_said(each, root, after=keyboard_after) for each in (evidence, reply) if each):
+        return "chat", None
+    quote = reply or words
+    if newest is None or matching_record(quote, root, after=since, phone=True, question=thread["token"]) is None:
+        if since != after and matching_record(quote, root, after=after, phone=True, question=thread["token"]):
+            return OWNER_SOURCE_PHONE, (f"that phone reply was typed before {since}, when {thread['token']} was given "
+                                        "to this comment, so it answers another comment: ask the owner about this one")
+        return "chat", owner_words_refusal(after)
+    if newest.get("tap") or not says_whole(newest.get("text"), comparable(quote)):
+        return OWNER_SOURCE_PHONE, f"the newest phone reply for {thread['token']} is not these words"
+    if verdict != COMMENT_REPLY:
+        return OWNER_SOURCE_PHONE, f"a phone reply in words is an instruction: record it as {COMMENT_REPLY}"
+    return OWNER_SOURCE_PHONE, None
+
+
+def one_second_after(moment):
+    return (datetime.strptime(moment, TIMESTAMP_FORMAT) + timedelta(seconds=1)).strftime(TIMESTAMP_FORMAT)
+
+
+def newest_phone_reply(root, token, after):
+    """The newest phone reply for this token, typed in this worktree after `after`, or None."""
+    replies = [record for record in owner_words()
+               if record.get("source") == OWNER_SOURCE_PHONE and record.get("question") == token
+               and typed_in(record, root) and inside_window(record, after, None)]
+    # A stable sort keeps the store's order for two replies typed in the same second.
+    return sorted(replies, key=lambda record: record["at"])[-1] if replies else None
+
+
+def phone_tap_problem(root, token, verdict, tap, after):
+    """A tap holds when the newest phone reply for this token is that tap, and the verdict is the one it means."""
+    newest = newest_phone_reply(root, token, after)
+    if newest is None:
+        return f"no phone reply for {token} was typed in this worktree after {after or 'the comment'}"
+    if newest.get("tap") != tap:
+        return f"the newest phone reply for {token} is not the tap R:{tap}"
+    if MARK_VERDICTS[tap] != verdict:
+        return f"the tap R:{tap} means {MARK_VERDICTS[tap]}, not {verdict}"
+    return None
 
 
 def read_marks(marks_file):
@@ -6229,11 +6675,7 @@ def token_of(anchor_text):
 
 
 def verdict_of_mark(mark):
-    if mark["verdict"] == "in":
-        return COMMENT_FIX
-    if mark["verdict"] == "out":
-        return COMMENT_SEPARATE
-    return COMMENT_REPLY
+    return MARK_VERDICTS.get(mark["verdict"].upper(), COMMENT_REPLY)
 
 
 def shorten(text):

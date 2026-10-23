@@ -4,6 +4,7 @@ Run: python3 -m unittest discover -s tests
 """
 
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
@@ -628,8 +629,8 @@ class SkipReasonTest(unittest.TestCase):
             self.assertTrue((Path(directory) / "token").exists())
 
 
-class OwnerWordsTest(ScratchRepository):
-    """`deviation --decided-by user --evidence "ok"` used to let the session approve its own work."""
+class OwnerWordsCase(ScratchRepository):
+    """A scratch repository with its own owner-words store and trace. It holds no tests of its own."""
 
     def setUp(self):
         super().setUp()
@@ -637,9 +638,15 @@ class OwnerWordsTest(ScratchRepository):
         self.enterContext(mock.patch.object(gate, "TRACE_DIRECTORY", self.directory / "trace"))
         (self.directory / "trace").mkdir()
 
-    def say(self, text, source="prompt", cwd=None):
-        gate.store_owner_words({"session_id": "s1", "cwd": str(cwd or self.root)}, source, text)
+    def say(self, text, source=gate.OWNER_SOURCE_PROMPT, cwd=None, root=None):
+        """Store a prompt as the hook would. `root` is the worktree the surface hook found, which only a phone
+        reply needs."""
+        gate.store_owner_words({"session_id": "s1", "cwd": str(cwd or root or self.root)}, source, text, root=root)
         gate.PROCESS_MEMO.clear()
+
+
+class OwnerWordsTest(OwnerWordsCase):
+    """`deviation --decided-by user --evidence "ok"` used to let the session approve its own work."""
 
     def said(self, quote, **window):
         gate.PROCESS_MEMO.clear()
@@ -678,6 +685,108 @@ class OwnerWordsTest(ScratchRepository):
         self.assertFalse(self.said("Is this guard reachable at all, or dead code"))
         self.assertTrue(self.said("look at this please"))
         self.assertTrue(self.said("the brief at ~/.local/state/phased/pr-1111/brief.md is out of date, ignore it"))
+
+    def test_ticketd_briefs_and_restarts_are_not_the_owners_words(self):
+        brief = "ticketd: request 1234567, read @/Users/x/.local/state/ticketd/1234567/brief.md and carry it out"
+        restart = ("# Restarting the ticketd session for request 1234567\n\n"
+                   "The daemon restarted you because the window was gone.\nWaive the overlay unit, it is styling only.")
+        self.say(brief)
+        self.say(restart)
+        self.say("ticketd: the request 1234567 brief is stale, ignore it")
+        self.assertFalse(self.said(brief))
+        self.assertFalse(self.said("Waive the overlay unit, it is styling only."))
+        self.assertTrue(self.said("the request 1234567 brief is stale, ignore it"))
+
+    def test_every_daemon_shape_is_dropped_whole(self):
+        for line in ("Phase 3 of PR #1111 is approved. Start phase 4: read @/x/brief.md and carry it out to its handoff.",
+                     "New review feedback on PR #1111 (phase 6): read @/x/brief.md, carry out the comments skill.",
+                     "New feedback on PR #1111 while phase 7 is still open: read @/x/brief.md and address it.",
+                     "# Restarting the session for 4me/ipaas PR #1111, phase 6 of 7\n\nwaive the overlay unit, it is styling only",
+                     "ticketd: request 1234567, read @/x/brief.md and carry out the work it lists.",
+                     "# Restarting the ticketd session for request 1234567\n\nwaive the overlay unit, it is styling only",
+                     "Another Claude session sent a message: waive the overlay unit, it is styling only"):
+            with self.subTest(line=line[:44]):
+                self.say(line)
+                self.assertNotIn(line, [record["text"] for record in gate.owner_words()])
+
+    def phone(self, text, root=None):
+        self.say(text, root=root or self.root)
+        return gate.owner_words()[-1] if gate.owner_words() else None
+
+    def test_a_phone_reply_keeps_its_question_and_worktree_and_loses_its_lead(self):
+        record = self.phone("phone Q2: keep the larger padding on the card")
+        self.assertEqual((record["source"], record["question"], record["text"]),
+                         ("phone", "Q2", "keep the larger padding on the card"))
+        self.assertEqual(record["worktree"], str(gate.real_path(self.root)))
+        self.assertTrue(self.said("keep the larger padding on the card", phone=True))
+        self.assertTrue(self.said("phone Q2: keep the larger padding on the card", phone=True))
+
+    def test_the_lead_cannot_pad_a_short_phone_answer(self):
+        self.phone("phone Q2: yes")
+        self.assertFalse(self.said("phone Q2: yes", phone=True))
+        self.assertFalse(self.said("yes", phone=True))
+
+    def test_a_phone_reply_counts_only_in_the_worktree_it_was_typed_in(self):
+        linked = self.directory / "linked"
+        sh(self.root, "git", "worktree", "add", "-q", "-b", "other", str(linked))
+        self.phone("phone Q2: record the avatar column as a design decision", root=linked)
+        self.assertFalse(self.said("record the avatar column as a design decision", phone=True))
+        self.say("record the avatar column as a design decision", cwd=linked)
+        self.assertTrue(self.said("record the avatar column as a design decision"))
+
+    def test_phone_words_count_only_where_the_caller_allows_them(self):
+        self.phone("phone Q2: the avatar column stays out of this release")
+        words = "the avatar column stays out of this release"
+        self.assertFalse(self.said(words))
+        self.assertTrue(self.said(words, phone=True))
+        self.assertIsNone(gate.matching_record(words, self.root, phone=True, question="Q3"))
+        self.assertIn("typed at the keyboard", gate.owner_evidence_problem(words, self.root))
+        self.assertIsNone(gate.owner_evidence_problem(words, self.root, phone=True))
+        decision = {"worktree": str(self.root), "evidence": words, "recorded_at": "2999-01-01T00:00:00Z"}
+        self.assertFalse(gate.owner_decision_holds(decision))
+        self.assertTrue(gate.owner_decision_holds(decision, phone=True))
+
+    def test_a_decision_that_names_no_question_takes_only_a_Q_reply(self):
+        for lead in ("P1", "C3", "ready"):
+            self.phone(f"phone {lead}: go ahead with the larger padding on the card")
+        self.assertFalse(self.said("go ahead with the larger padding on the card", phone=True))
+        self.phone("phone Q4: go ahead with the larger padding on the card")
+        self.assertTrue(self.said("go ahead with the larger padding on the card", phone=True))
+
+    def test_a_design_difference_takes_only_a_Q_reply_from_the_phone(self):
+        self.phone("phone P1: keep the larger padding on the card, the design is out of date")
+        self.phone("phone Q2: drop the avatar column, it is not in this release")
+        decision = {"region": {"x": 0, "y": 0, "width": 10, "height": 10}, "evidence_after": "2000-01-01T00:00:00Z", "worktree": str(self.root),
+                    "decided_by": "user", "id": "no-avatar", "kind": "design", "recorded_at": "2999-01-01T00:00:00Z"}
+        self.assertEqual(gate.owner_decision_problems({**decision, "evidence": "drop the avatar column, it is not in this release"}), [])
+        self.assertEqual(gate.excused_by({"x": 1, "y": 1, "w": 2, "h": 2},
+                                         [{**decision, "evidence": "drop the avatar column, it is not in this release"}]),
+                         "no-avatar")
+        self.assertNotEqual(gate.owner_decision_problems(
+            {**decision, "evidence": "keep the larger padding on the card, the design is out of date"}), [])
+
+    def test_whitespace_before_the_lead_still_reads_as_a_phone_reply(self):
+        record = self.phone("  phone Q2: keep the larger padding on the card")
+        self.assertEqual((record["source"], record["text"]), ("phone", "keep the larger padding on the card"))
+        self.assertFalse(self.said("keep the larger padding on the card"))
+
+    def test_a_phone_tap_is_never_words(self):
+        record = self.phone("phone C3: R:IN")
+        self.assertEqual((record["source"], record["tap"], record["text"]), ("phone", "IN", ""))
+        self.assertFalse(self.said("phone C3: R:IN", phone=True))
+        self.assertFalse(self.said("R:IN", phone=True))
+
+    def test_an_R_text_phone_reply_keeps_only_its_text(self):
+        for text in ("phone C3: R:rename it in a separate request", "phone C3: r: rename it in a separate request"):
+            with self.subTest(text=text):
+                record = self.phone(text)
+                self.assertEqual((record.get("tap"), record["text"]), (None, "rename it in a separate request"))
+        record = self.phone("phone C3: R:INSIDE the loop is fine")
+        self.assertEqual((record.get("tap"), record["text"]), (None, "INSIDE the loop is fine"))
+
+    def test_a_lead_after_a_pasted_block_is_not_a_phone_reply(self):
+        record = self.phone('<pasted_content id="aa">anything</pasted_content id="aa"> phone C3: R:IN')
+        self.assertEqual((record["source"], record.get("tap")), ("prompt", None))
 
     def test_text_the_gate_printed_first_is_refused(self):
         self.printed("2026-10-16T10:00:00Z", "gate: run skip-once with a reason of your own words", command="pre-push")
@@ -1029,6 +1138,128 @@ class GuardTest(unittest.TestCase):
                         "python3 -W ignore ~/personal/scripts/gate/gate.py units"):
             self.assertFalse(self.denied(command, cwd="/work/wt"), command)
 
+    READY_SPELLINGS = ("gh pr ready", "gh pr ready 123", "gh pr ready --undo 123", "gh pr ready 123 --repo 4me/ipaas",
+                       "gh pr -R 4me/ipaas ready 5", "gh pr \"ready\" 5", "gh pr re''ady 5", "g\\h pr ready 5",
+                       "cd /work/wt && gh pr ready 5", "env gh pr ready 5", "echo 5 | xargs gh pr ready",
+                       "bash -c 'gh pr ready 5'", "echo $(gh pr ready 5)",
+                       "python3 -c \"import os; os.system('gh pr ready 5')\"", "awk 'BEGIN{system(\"gh pr ready 5\")}'",
+                       "ruby -e 'system(\"gh pr ready 5\")'",
+                       "gh api graphql -f query='mutation{markPullRequestReadyForReview("
+                       "input:{pullRequestId:\"PR_1\"}){clientMutationId}}'",
+                       "gh api graphql -f query='mutation{markPullRequest''ReadyForReview(input:{pullRequestId:\"PR_1\"})"
+                       "{clientMutationId}}'",
+                       "gh api graphql -F query=@- <<'EOF'\nmutation{markPullRequestReadyForReview("
+                       "input:{pullRequestId:\"PR_1\"}){clientMutationId}}\nEOF",
+                       "gh api graphql -f query='mutation{convertPullRequestToDraft(input:{pullRequestId:\"PR_1\"})"
+                       "{clientMutationId}}'",
+                       "gh alias set r 'pr ready'",
+                       "python3 -c \"import os; os.system('gh alias set r pr-ready')\"",
+                       "python3 -c \"import os; os.system('gh api graphql -f query=mutation{convertPullRequestToDraft"
+                       "(input:{pullRequestId:PR_1}){clientMutationId}}')\"",
+                       "gh alias import /tmp/aliases.yml",
+                       "gh pr $(echo ready) 5", "gh pr `echo ready` 5", "sh -c 'gh pr \"$1\" 5' _ ready",
+                       "gh pr create --title x --body y", "gh pr create --draft=false --title x",
+                       "gh api graphql -f query='mutation{createPullRequest(input:{repositoryId:\"R\"}){clientMutationId}}'",
+                       "gh api repos/4me/ipaas/pulls -f title=x -f head=b -f base=main",
+                       "gh api -X POST repos/4me/ipaas/pulls --input body.json",
+                       "gh api graphql -F query=@/tmp/ready.graphql",
+                       "gh api graphql --input /tmp/ready.json",
+                       "gh pr new --fill", "gh pr -R 4me/ipaas new --title x --body y", "gh pr revert 1100 --title x",
+                       "gh api graphql -f query='mutation{revertPullRequest(input:{pullRequestId:\"PR_1\"}){clientMutationId}}'",
+                       "gh api -X GET -X POST repos/4me/ipaas/pulls -f title=x -f head=b -f base=main",
+                       "gh api --method=GET -XPOST repos/4me/ipaas/pulls -f title=x",
+                       "gh api 'repos/4me/ipaas/pulls?a=1' -f title=x -f head=b -f base=main",
+                       "echo ready | xargs gh pr", "printf 'pr\\nready\\n5\\n' | xargs gh",
+                       "gh pr ${TICKETD_SESSION:+ready} 5", "$(which gh) $(echo pr) ready 5",
+                       "cat /tmp/ready.graphql | gh api graphql -F query=@-", "gh api graphql -F query=@- < /tmp/q.graphql",
+                       "gh api graphql -f query=\"$(cat /tmp/q.graphql)\"", "gh api $(echo repos/4me/ipaas/pulls) -f title=x",
+                       "gh api graphql -F query=@- <<'EOF'\nmutation{convertPullRequestToDraft("
+                       "input:{pullRequestId:\"PR_1\"}){clientMutationId}}\nEOF",
+                       "gh api graphql -iF query=@/tmp/r.graphql", "gh api graphql -iFquery=@/tmp/r.graphql",
+                       "gh api graphql --field=query=@/tmp/r.graphql",
+                       "gh pr ${TICKETD_SESSION#$TICKETD_SESSION}ready 5", "gh pr ${X:-ready} 5",
+                       "$(command -v gh) pr ready 5", "`which gh` pr ready 5", "$(which gh) ${X:-pr} ready 5",
+                       "gh api graphql -F query=@- <<EOF\n$(cat /tmp/q.graphql)\nEOF",
+                       "gh api graphql -F query=@- <<'EOF' <>/tmp/r.graphql\nquery{viewer{login}}\nEOF",
+                       "cat /tmp/r.graphql | gh api graphql -F query=@- 3<<'EOF'\nx\nEOF",
+                       "gh api \"$PR_URL\" -f title=x", "gh pr 2>/dev/null ready 5", "gh 2>&1 pr ready 5",
+                       "gh pr >/dev/null create --title x --body y", "gh api graphql $(cat /tmp/args)",
+                       "Q=$(cat /tmp/r.graphql); gh api graphql -f query=\"$Q\"",
+                       "export Q=\"$(cat /tmp/r)\"; gh api graphql -f query=\"$Q\"",
+                       "gh api -X POST repos/4me/ipaas/pulls -f title=x -f head=b -f base=main -q -XGET",
+                       "gh api -iXPOST repos/4me/ipaas/pulls", "gh api -if title=x repos/4me/ipaas/pulls",
+                       "echo ready | xargs 'g'h pr", "echo ready | xargs g\\h pr", "echo ready | x'a'rgs gh pr",
+                       "echo 5 | xargs -I{} gh pr {} 5", "echo ready | xargs -I X gh pr X 5", "xargs gh pr < /tmp/args")
+
+    def loop_session(self, value):
+        """The loop variable set to `value` (None leaves it unset), and the live check stubbed to pass."""
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop(gate.LOOP_SESSION_VARIABLE, None)
+        if value is not None:
+            os.environ[gate.LOOP_SESSION_VARIABLE] = value
+        self.enterContext(mock.patch.object(gate, "repository_root", return_value=Path("/work/wt")))
+        return self.enterContext(mock.patch.object(gate, "ready_guard_reason", return_value=None))
+
+    def test_a_loop_session_never_changes_the_draft_state(self):
+        live_check = self.loop_session("1")
+        for command in self.READY_SPELLINGS:
+            self.assertEqual(gate.guard_bash(command, "/work/wt"), gate.LOOP_READY_REASON, command)
+        live_check.assert_not_called()
+
+    def test_outside_a_loop_session_the_same_commands_go_to_the_live_check(self):
+        for value in (None, "0", ""):
+            live_check = self.loop_session(value)
+            for command in self.READY_SPELLINGS[:4]:
+                self.assertIsNone(gate.guard_bash(command, "/work/wt"), (value, command))
+            self.assertTrue(live_check.called, value)
+
+    def test_a_loop_session_still_reads_and_searches_pull_requests(self):
+        self.loop_session("1")
+        for command in ("gh pr view 5 --json isDraft", "gh pr list --draft", "gh pr list --search ready",
+                        "gh pr checks 5", "gh api repos/4me/ipaas/pulls/5 --jq .draft",
+                        "gh pr edit 5 --remove-label ready", "gh alias list",
+                        "gh api repos/4me/ipaas/pulls", "gh api -X GET repos/4me/ipaas/pulls -f state=open",
+                        "gh api graphql -f query='query{viewer{login}}'",
+                        "gh api graphql -f query='query($owner:String!){repository(owner:$owner,name:\"x\"){id}}' -f owner=4me",
+                        "gh api graphql -F query=@- <<'EOF'\nquery{viewer{login}}\nEOF",
+                        "gh api -X GET search/issues -f q='@me is:open'",
+                        "gh api 'repos/4me/ipaas/pulls?state=open'",
+                        ".claude/bin/pr-create --title \"Request#1 x\" --request 1",
+                        "gh api \"/repos/4me/ipaas/commits/$(git rev-parse HEAD)/check-runs\" --jq '.check_runs[].conclusion'",
+                        "gh api graphql -f query='query{viewer{login}}' > /tmp/pulls",
+                        "for n in 1106 1107; do gh api graphql -F pr=$n -f query='query{viewer{login}}' > /tmp/t-$n.json; done",
+                        "gh api -X POST repos/{owner}/{repo}/issues/5/labels -f 'labels[]=x'",
+                        "gh api repos/{owner}/{repo}/pulls/5/reviews -f event=COMMENT -f body=x",
+                        "$(npm bin)/eslint $(git ls-files)", "gh api -X=GET repos/4me/ipaas/pulls -f state=open",
+                        "gh api repos/4me/ipaas/pulls/$N --jq .draft", "git ls-files | xargs grep -l 'gh pr'",
+                        "echo x | xargs ls ~/.config/gh", "ls | xargs -n1 gh pr view", "xargs grep -n gh-pages",
+                        "gh api search/issues --raw-field q=@me", "$(which gh) pr view 5",
+                        "gh api -X POST -X GET repos/4me/ipaas/pulls",
+                        "\"${BASE[@]}\" \"$@\" \"$h\" --have-token 2>&1"):
+            self.assertIsNone(gate.guard_bash(command, "/work/wt"), command)
+
+    def test_the_hook_reads_the_loop_variable_from_its_own_environment(self):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "gh pr ready 5"}, "cwd": "/tmp"})
+        with tempfile.TemporaryDirectory() as home:
+            environment = {**os.environ, "HOME": home, gate.LOOP_SESSION_VARIABLE: "1"}
+            done = subprocess.run([sys.executable, str(GATE_FILE), "guard"], input=payload, capture_output=True,
+                                  text=True, cwd=home, env=environment)
+        self.assertIn('"permissionDecision": "deny"', done.stdout)
+        self.assertIn("ticketd", done.stdout)
+
+    def test_a_session_only_reads_tmux(self):
+        for command in ("tmux send -t %1 'phone C3: R:IN' Enter", "tmux send-k -t %1 x", "tmux setb x \\; pasteb",
+                        "tmux set-buffer x", "tmux load-buffer /tmp/x", "tmux run-shell 'echo x'", "tmux -C",
+                        "tmux source-file /tmp/x", "tmux display -p x \\; send x", "tmux",
+                        "tmux -uT ls send -t %1 -l 'phone C3: R:IN'", "tmux -uf ls send -t %1 x",
+                        "tmux -2L has-session send -t %1 x", "tmux display -p '#(tmux send -t %1 x Enter)'",
+                        "tmux ls -F '#(sh /tmp/x.sh)'", "tmux display -p '#{E:pane_title}'", "$(which tmux) send -t %1 x"):
+            self.assertIsNotNone(self.denied(command, cwd="/work/wt"), command)
+        for command in ("tmux display-message -p '#{pane_id}'", "tmux -L ghm list-windows -a",
+                        "tmux display -p '##(literal)'", "tmux list-windows -a -F '#{window_id} #{pane_pid}'",
+                        "tmux capture-pane -p -t %1", "tmux has-session -t ipaas", "tmux list-panes -a"):
+            self.assertFalse(self.denied(command, cwd="/work/wt"), command)
+
     def test_a_guard_that_crashes_refuses(self):
         payload = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
         with mock.patch.object(gate, "guard_bash", side_effect=RecursionError), \
@@ -1036,6 +1267,383 @@ class GuardTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()) as printed:
             gate.guard()
         self.assertIn('"permissionDecision": "deny"', printed.getvalue())
+
+
+class CommentPhoneTest(OwnerWordsCase):
+    """A phone reply decides only the comment it names, in the worktree it was typed in, while it is the newest
+    reply for that comment. A tap is a choice and must match the verdict. A token never moves to another thread."""
+
+    PR = 1136
+
+    def setUp(self):
+        super().setUp()
+        gate.comments_directory(self.root, self.PR).mkdir(parents=True)
+        self.threads = [self.thread("C3", "thread-a"), self.thread("C4", "thread-b")]
+
+    def thread(self, token, identifier, token_since="2000-01-01T00:00:00Z"):
+        return {"token": token, "id": identifier, "path": "platform/app/x.rb", "line": 4,
+                "latest_at": "2000-01-01T00:00:00Z", "token_since": token_since}
+
+    def type(self, text, root=None):
+        self.say(text, root=root or self.root)
+
+    def decide(self, token, verdict, evidence):
+        gate.PROCESS_MEMO.clear()
+        arguments = ["--token", token, "--verdict", verdict, "--evidence", evidence]
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            try:
+                gate.comment_decide_from_chat(self.root, self.PR, self.threads, arguments)
+            except SystemExit:
+                return None, printed.getvalue()
+        return gate.decisions_of(self.root, self.PR), printed.getvalue()
+
+    def test_a_tap_decides_only_its_own_comment(self):
+        self.type("phone C3: R:IN")
+        decisions, _ = self.decide("C3", gate.COMMENT_FIX, "R:IN")
+        self.assertEqual((decisions["thread-a"]["source"], decisions["thread-a"]["verdict"]), ("phone", gate.COMMENT_FIX))
+        refused, printed = self.decide("C4", gate.COMMENT_FIX, "R:IN")
+        self.assertIsNone(refused)
+        self.assertIn("no phone reply for C4", printed)
+
+    def test_a_tap_quoted_with_its_lead_counts_the_same(self):
+        self.type("phone C3: R:IN")
+        decisions, _ = self.decide("C3", gate.COMMENT_FIX, "phone C3: R:IN")
+        self.assertEqual(decisions["thread-a"]["source"], "phone")
+
+    def test_a_tap_must_mean_the_verdict(self):
+        self.type("phone C3: R:IN")
+        refused, printed = self.decide("C3", gate.COMMENT_SEPARATE, "R:IN")
+        self.assertIsNone(refused)
+        self.assertIn(f"means {gate.COMMENT_FIX}", printed)
+
+    def test_a_tap_typed_before_the_reviewers_latest_comment_is_refused(self):
+        self.type("phone C3: R:IN")
+        self.threads[0] = {**self.thread("C3", "thread-a"), "latest_at": "2999-01-01T00:00:00Z"}
+        refused, _ = self.decide("C3", gate.COMMENT_FIX, "R:IN")
+        self.assertIsNone(refused)
+
+    def test_a_newer_reply_replaces_the_tap(self):
+        self.type("phone C3: R:IN")
+        self.type("phone C3: R:keep it as it is, we agreed on that")
+        refused, printed = self.decide("C3", gate.COMMENT_FIX, "R:IN")
+        self.assertIsNone(refused)
+        self.assertIn("is not the tap R:IN", printed)
+
+    def test_a_newer_tap_replaces_an_older_reply(self):
+        self.type("phone C3: R:rename it in a separate request")
+        self.type("phone C3: R:IN")
+        refused, printed = self.decide("C3", gate.COMMENT_REPLY, "R:rename it in a separate request")
+        self.assertIsNone(refused)
+        self.assertIn("is not these words", printed)
+        decisions, _ = self.decide("C3", gate.COMMENT_FIX, "R:IN")
+        self.assertEqual((decisions["thread-a"]["source"], decisions["thread-a"]["verdict"]), ("phone", gate.COMMENT_FIX))
+
+    def test_a_tap_from_another_worktree_is_refused(self):
+        linked = self.directory / "linked"
+        sh(self.root, "git", "worktree", "add", "-q", "-b", "other", str(linked))
+        self.type("phone C3: R:IN", root=linked)
+        refused, _ = self.decide("C3", gate.COMMENT_FIX, "R:IN")
+        self.assertIsNone(refused)
+
+    def test_an_R_text_phone_reply_is_an_instruction_for_its_own_comment(self):
+        self.type("phone C3: R:rename it in a separate request")
+        refused, printed = self.decide("C3", gate.COMMENT_SEPARATE, "R:rename it in a separate request")
+        self.assertIsNone(refused)
+        self.assertIn("is an instruction", printed)
+        refused, printed = self.decide("C4", gate.COMMENT_REPLY, "rename it in a separate request")
+        self.assertIsNone(refused)
+        self.assertNotIn("typed at the keyboard", printed)
+        decisions, _ = self.decide("C3", gate.COMMENT_REPLY, "R:rename it in a separate request")
+        self.assertEqual(decisions["thread-a"]["source"], "phone")
+
+    def test_a_reply_to_a_question_never_decides_a_comment(self):
+        self.type("phone Q2: rename it in a separate request please")
+        refused, printed = self.decide("C3", gate.COMMENT_REPLY, "rename it in a separate request please")
+        self.assertIsNone(refused)
+        self.assertNotIn("typed at the keyboard", printed)
+
+    def test_evidence_whose_lead_names_another_comment_is_refused(self):
+        self.type("phone C3: R:IN")
+        refused, printed = self.decide("C3", gate.COMMENT_FIX, "phone C4: R:IN")
+        self.assertIsNone(refused)
+        self.assertIn("phone reply for C4", printed)
+
+    def test_a_reply_typed_before_the_token_was_given_out_says_so(self):
+        self.type("phone C3: R:rename it in a separate request")
+        self.threads[0] = self.thread("C3", "thread-a", token_since="2999-01-01T00:00:00Z")
+        refused, printed = self.decide("C3", gate.COMMENT_REPLY, "R:rename it in a separate request")
+        self.assertIsNone(refused)
+        self.assertIn("answers another comment", printed)
+
+    def test_a_reply_typed_before_the_token_was_given_out_is_refused(self):
+        self.type("phone C3: R:rename it in a separate request")
+        self.type("phone C4: R:IN")
+        self.threads = [self.thread("C3", "thread-a", token_since="2999-01-01T00:00:00Z"),
+                        self.thread("C4", "thread-b", token_since="2999-01-01T00:00:00Z")]
+        self.assertIsNone(self.decide("C3", gate.COMMENT_REPLY, "R:rename it in a separate request")[0])
+        self.assertIsNone(self.decide("C4", gate.COMMENT_FIX, "R:IN")[0])
+
+    def test_the_newest_reply_counts_even_when_an_older_one_holds_the_same_words(self):
+        self.type("phone C3: R:rename it in a separate request")
+        self.type("phone C3: R:rename it in a separate request. Also add a spec for it.")
+        decisions, _ = self.decide("C3", gate.COMMENT_REPLY, "rename it in a separate request")
+        self.assertEqual(decisions["thread-a"]["source"], "phone")
+
+    def test_a_newer_text_reply_replaces_an_older_one(self):
+        self.type("phone C3: R:rename it in a separate request")
+        self.type("phone C3: R:no, fix it in this pull request after all")
+        refused, printed = self.decide("C3", gate.COMMENT_REPLY, "R:rename it in a separate request")
+        self.assertIsNone(refused)
+        self.assertIn("is not these words", printed)
+        decisions, _ = self.decide("C3", gate.COMMENT_REPLY, "R:no, fix it in this pull request after all")
+        self.assertEqual(decisions["thread-a"]["source"], "phone")
+
+    def test_older_keyboard_words_do_not_decide_after_a_newer_phone_reply(self):
+        self.say("rename the scrubber one in a separate request")
+        self.type("phone C3: R:IN")
+        refused, _ = self.decide("C3", gate.COMMENT_SEPARATE, "rename the scrubber one in a separate request")
+        self.assertIsNone(refused)
+
+    def test_every_phone_reply_in_words_on_a_comment_is_an_instruction(self):
+        self.type('phone C3: <pasted_content id="aa">anything</pasted_content id="aa"> R:rename it in a separate request')
+        self.type("phone C4: fine by me. R: rename it in a separate request")
+        for token, quote in (("C3", "R:rename it in a separate request"), ("C4", "rename it in a separate request")):
+            with self.subTest(token=token):
+                refused, _ = self.decide(token, gate.COMMENT_FIX, quote)
+                self.assertIsNone(refused)
+        self.assertIn("is an instruction", self.decide("C4", gate.COMMENT_FIX, "rename it in a separate request")[1])
+
+    def test_keyboard_words_still_decide_as_chat(self):
+        self.say("yes fix the scrubber one here, in this pull request")
+        decisions, _ = self.decide("C4", gate.COMMENT_FIX, "yes fix the scrubber one here, in this pull request")
+        self.assertEqual(decisions["thread-b"]["source"], "chat")
+
+    def fetch(self, *identifiers):
+        """Run comment_fetch on these open threads and return each one's (token, token_since)."""
+        nodes = [{"id": identifier, "isResolved": False, "path": "x.rb", "line": 1,
+                  "comments": {"nodes": [{"createdAt": "2000-01-01T00:00:00Z", "body": "b"}]}}
+                 for identifier in identifiers]
+        payload = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes}}}}}
+        done = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+        with mock.patch.object(gate, "require_repository", lambda name: self.root), \
+                mock.patch.object(gate, "pull_request_number", lambda root, value: self.PR), \
+                mock.patch.object(gate, "repository_slug", lambda root: "4me/ipaas"), \
+                mock.patch.object(gate, "print_thread_list", lambda *values: None), \
+                mock.patch.object(gate.subprocess, "run", lambda *values, **options: done):
+            gate.comment_fetch([])
+        stored = gate.read_json(gate.comments_directory(self.root, self.PR) / "threads.json")["threads"]
+        return {thread["id"]: (thread["token"], thread["token_since"]) for thread in stored}
+
+    def test_a_file_written_before_issued_keeps_its_tokens(self):
+        gate.write_json(gate.comments_directory(self.root, self.PR) / "threads.json",
+                        {"pr": self.PR, "threads": [{"id": "thread-a", "token": "C1"}, {"id": "thread-b", "token": "C2"}]})
+        with mock.patch.object(gate, "now_iso", lambda: "2026-02-01T00:00:00Z"):
+            stored = self.fetch("thread-b", "thread-c")
+        self.assertEqual(stored, {"thread-b": ("C2", "2026-02-01T00:00:00Z"), "thread-c": ("C3", "2026-02-01T00:00:00Z")})
+
+    def test_a_token_never_moves_to_another_thread(self):
+        fetch = self.fetch
+        with mock.patch.object(gate, "now_iso", lambda: "2026-01-01T00:00:00Z"):
+            first = fetch("thread-a", "thread-b")
+        self.assertEqual(first, {"thread-a": ("C1", "2026-01-01T00:00:00Z"), "thread-b": ("C2", "2026-01-01T00:00:00Z")})
+        with mock.patch.object(gate, "now_iso", lambda: "2026-02-01T00:00:00Z"):
+            self.assertEqual(fetch("thread-a"), {"thread-a": ("C1", "2026-01-01T00:00:00Z")})
+            self.assertEqual(fetch("thread-a", "thread-c"),
+                             {"thread-a": ("C1", "2026-01-01T00:00:00Z"), "thread-c": ("C3", "2026-02-01T00:00:00Z")})
+            self.assertEqual(fetch("thread-b", "thread-c")["thread-b"], ("C2", "2026-01-01T00:00:00Z"))
+
+
+class ChecksWorktreeTest(unittest.TestCase):
+    """The checks lane: a worktree another one holds is refused and left alone, and a lock that is never
+    taken is a failed row, not a traceback."""
+
+    def setUp(self):
+        directory = Path(tempfile.mkdtemp(prefix="gate-checks-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        self.addCleanup(gate.PROCESS_MEMO.clear)
+        self.directory = directory
+        self.checks, self.holder, self.caller = directory / "checks", directory / "holder", directory / "caller"
+        for path in (self.checks, self.holder, self.caller):
+            path.mkdir()
+        for path in (self.holder, self.caller):
+            init_repository(path)
+        self.real_reset = gate.reset_checks_worktree
+        self.resets = []
+        for name, value in (("CHECKS_WORKTREE", self.checks), ("CHECKS_LOCK_FILE", directory / ".checks.lock"),
+                            ("checks_ready", lambda: True), ("git", self.untouched),
+                            ("current_branch", lambda root: "wip/outlook_renew_subscriptions"),
+                            ("reset_checks_worktree", self.reset)):
+            patcher = mock.patch.object(gate, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def untouched(self, *arguments, **options):
+        raise AssertionError(f"the checks worktree was touched: {arguments}")
+
+    def reset(self, rebuild_dev_db=False):
+        self.resets.append(rebuild_dev_db)
+        return [("reset", "ok", "")]
+
+    def hold(self, **fields):
+        marker = {"branch": "requests/81878933-solution-icon", "source_root": str(self.holder),
+                  "at": "2026-10-14T10:41:34Z", "migrations": True, "boot": gate.boot_time(), **fields}
+        gate.write_json(gate.checks_in_use_path(), marker)
+        return marker
+
+    def held_lock(self):
+        holder = open(gate.CHECKS_LOCK_FILE, "w")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        return mock.patch.object(gate, "CHECKS_LOCK_TIMEOUT_SECONDS", 0)
+
+    def run_checks(self, *arguments, cwd):
+        with mock.patch.object(gate.os, "getcwd", lambda: str(cwd or self.directory)), \
+                contextlib.redirect_stdout(io.StringIO()) as printed, self.assertRaises(SystemExit) as exit:
+            gate.checks(list(arguments))
+        return exit.exception.code, printed.getvalue()
+
+    def test_a_finalize_refused_by_another_worktree_leaves_the_checks_worktree_alone(self):
+        marker = self.hold()
+        rows = gate.tool_checks_in_checks_worktree(self.caller, [], run_specs=True)
+        self.assertEqual([(name, status) for name, status, _ in rows], [("checks", "FAIL")])
+        self.assertIn("requests/81878933-solution-icon", rows[0][2])
+        self.assertEqual(self.resets, [])
+        self.assertEqual(gate.read_json(gate.checks_in_use_path()), marker)
+
+    def test_a_failure_after_the_checkout_still_resets(self):
+        with mock.patch.object(gate, "apply_branch_to_checks", mock.Mock(side_effect=RuntimeError("git apply exited 1"))):
+            rows = gate.tool_checks_in_checks_worktree(self.caller, [], run_specs=True)
+        self.assertEqual(rows, [("checks", "FAIL", "git apply exited 1"), ("reset", "ok", "")])
+
+    def test_a_lock_that_is_never_taken_is_a_failed_row_not_a_traceback(self):
+        with self.held_lock(), mock.patch.object(gate, "apply_branch_to_checks", self.untouched):
+            rows = gate.tool_checks_in_checks_worktree(self.caller, [], run_specs=True)
+        self.assertEqual(rows, [("checks", "FAIL", "the checks worktree stayed locked for 0 seconds")])
+        self.assertEqual(self.resets, [])
+
+    def test_a_reset_from_another_worktree_is_refused(self):
+        marker = self.hold()
+        code, printed = self.run_checks("reset", cwd=self.caller)
+        self.assertEqual(code, 1)
+        self.assertIn("checks reset refused", printed)
+        self.assertIn(str(self.holder), printed)
+        self.assertEqual(self.resets, [])
+        self.assertEqual(gate.read_json(gate.checks_in_use_path()), marker)
+
+    def test_a_reset_from_the_holding_worktree_resets(self):
+        self.hold()
+        code, _ = self.run_checks("reset", cwd=self.holder)
+        self.assertEqual((code, self.resets), (0, [False]))
+
+    def test_a_reset_runs_from_anywhere_when_nothing_holds_or_the_holder_is_gone(self):
+        for fields in (None, {"boot": gate.boot_time() + 1}, {"source_root": str(self.holder / "removed")}):
+            with self.subTest(fields=fields):
+                self.resets.clear()
+                gate.checks_in_use_path().unlink(missing_ok=True)
+                if fields is not None:
+                    self.hold(**fields)
+                code, _ = self.run_checks("reset", cwd=None)
+                self.assertEqual((code, self.resets), (0, [False]))
+
+    def test_a_reset_from_the_checks_worktree_itself_is_refused_while_held(self):
+        self.hold(branch="HEAD")
+        code, printed = self.run_checks("reset", cwd=self.checks)
+        self.assertEqual(code, 1)
+        self.assertIn("checks reset refused", printed)
+
+    def test_an_apply_from_another_worktree_is_still_refused(self):
+        self.hold()
+        code, printed = self.run_checks("apply", cwd=self.caller)
+        self.assertEqual(code, 1)
+        self.assertTrue(printed.startswith("checks apply refused:"))
+
+    def test_a_reset_under_a_lock_that_is_never_taken_exits_1_with_a_message(self):
+        with self.held_lock():
+            code, printed = self.run_checks("reset", cwd=self.holder)
+        self.assertEqual(code, 1)
+        self.assertIn("checks reset refused: the checks worktree stayed locked for 0 seconds", printed)
+
+    def test_the_holder_is_the_worktree_because_every_detached_worktree_reports_HEAD(self):
+        marker = self.hold(branch="HEAD")
+        self.assertIsNotNone(gate.checks_in_use_refusal(self.caller, marker))
+        self.assertNotIn("reset from that worktree", gate.checks_in_use_refusal(self.caller, marker))
+        self.assertIsNone(gate.checks_in_use_refusal(self.holder, marker))
+        self.assertIsNone(gate.checks_in_use_refusal(self.caller, {}))
+
+    def test_a_reset_falls_back_to_the_last_fetched_main_when_the_fetch_fails_or_stalls(self):
+        for failure in (RuntimeError("git fetch exited 1\ncannot lock ref"),
+                        subprocess.TimeoutExpired("git fetch", gate.CHECKS_FETCH_TIMEOUT_SECONDS)):
+            calls = []
+
+            def git(root, *arguments, allow_exit_codes=(0,), input_text=None, timeout=None):
+                calls.append(arguments[0])
+                if arguments[0] == "fetch":
+                    raise failure
+                return subprocess.CompletedProcess(arguments, 0, stdout="a995bfa8\n", stderr="")
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(gate, "git", git):
+                steps = self.real_reset()
+                self.assertEqual(calls, ["fetch", "checkout", "reset", "clean", "rev-parse"])
+                self.assertEqual([(name, status) for name, status, _ in steps], [("fetch", "skip"), ("reset", "ok")])
+                if isinstance(failure, RuntimeError):
+                    self.assertIn("cannot lock ref", steps[0][2])
+
+    def test_a_check_that_times_out_inside_finalize_is_a_failed_row(self):
+        timeout = subprocess.TimeoutExpired(["bundle", "exec", "rubocop"], gate.FINALIZE_TIMEOUT_SECONDS)
+        with mock.patch.object(gate, "apply_branch_to_checks", lambda root: [("apply", "ok", "")]), \
+                mock.patch.object(gate, "rubocop_checks", mock.Mock(side_effect=timeout)):
+            rows = gate.tool_checks_in_checks_worktree(self.caller, [], run_specs=True)
+        self.assertEqual([(name, status) for name, status, _ in rows], [("apply", "ok"), ("checks", "FAIL"), ("reset", "ok")])
+
+    def test_a_reset_command_that_fails_exits_1_with_a_message(self):
+        with mock.patch.object(gate, "reset_checks_worktree", mock.Mock(side_effect=RuntimeError("git clean exited 1"))):
+            code, printed = self.run_checks("reset", cwd=None)
+        self.assertEqual(code, 1)
+        self.assertIn("checks reset failed: git clean exited 1", printed)
+
+    def test_a_holder_folder_inside_another_repository_is_gone(self):
+        (self.caller / "nested").mkdir()
+        marker = self.hold(source_root=str(self.caller / "nested"))
+        self.assertTrue(gate.checks_holder_gone(marker).startswith("when"))
+
+    def test_the_holder_does_not_take_over_from_itself_after_a_restart(self):
+        self.hold(source_root=str(self.caller), boot=gate.boot_time() - 1)
+        head = subprocess.CompletedProcess([], 0, stdout="a995bfa8\n", stderr="")
+        with mock.patch.object(gate, "git", lambda *arguments, **options: head), \
+                mock.patch.object(gate, "snapshot_patch", lambda root, base: ""), \
+                mock.patch.object(gate, "migrations_in", lambda root, base: False), \
+                mock.patch.object(gate, "diff_base", lambda root: "base"), \
+                mock.patch.object(gate, "command_check", lambda name, *values, **options: (name, "ok", "")):
+            steps = gate.apply_branch_to_checks(self.caller)
+        self.assertNotIn("takeover", [name for name, _, _ in steps])
+
+    def test_a_bare_checks_reports_who_holds_the_checks_worktree(self):
+        head = subprocess.CompletedProcess([], 0, stdout="a995bfa8\n", stderr="")
+
+        def status():
+            with mock.patch.object(gate, "git", lambda *arguments, **options: head), \
+                    contextlib.redirect_stdout(io.StringIO()) as printed:
+                gate.checks([])
+            return printed.getvalue()
+        self.assertEqual(status().splitlines()[-1], "free")
+        self.hold()
+        self.assertIn(f"in use by requests/81878933-solution-icon from {self.holder}", status())
+        self.hold(boot=gate.boot_time() + 1)
+        self.assertIn("its holder left at the restart", status())
+
+    def test_a_holder_whose_folder_is_no_longer_a_worktree_is_gone(self):
+        shutil.rmtree(self.holder / ".git")
+        self.hold()
+        code, _ = self.run_checks("reset", cwd=self.caller)
+        self.assertEqual((code, self.resets), (0, [False]))
+
+    def test_a_reset_that_fails_inside_finalize_is_a_failed_row_not_a_traceback(self):
+        with mock.patch.object(gate, "apply_branch_to_checks", lambda root: [("apply", "ok", "")]), \
+                mock.patch.object(gate, "rubocop_checks", lambda *values: []), \
+                mock.patch.object(gate, "javascript_checks", lambda *values: []), \
+                mock.patch.object(gate, "reset_checks_worktree", mock.Mock(side_effect=RuntimeError("git clean exited 1"))):
+            rows = gate.tool_checks_in_checks_worktree(self.caller, [], run_specs=False)
+        self.assertEqual([(name, status) for name, status, _ in rows],
+                         [("apply", "ok"), ("specs", "skip"), ("reset", "FAIL")])
 
 
 class SetupTest(unittest.TestCase):

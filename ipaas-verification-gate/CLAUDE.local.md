@@ -213,6 +213,17 @@ Where it binds:
 - **The guard refuses `gh pr ready` and the `markPullRequestReadyForReview` mutation.** Taking the
   pull request out of draft is the moment the work is offered to a reviewer, and nothing owned that
   moment before.
+- **In a ticketd loop session (`TICKETD_SESSION=1`) the guard refuses every spelling of them it can
+  read**, whatever the live check says, together with `--undo`, the draft mutations, `gh pr create`,
+  `gh pr new` and `gh pr revert`, a `gh api` write to the pulls collection, `gh alias set` and
+  `gh alias import`, a `gh api` request read from a file or from `--input`, and a gh call that xargs
+  completes. It is a tripwire for ordinary spellings: ticketd also puts back into draft any loop pull
+  request that left draft without the user's signed "ready". Open the pull request with
+  `.claude/bin/pr-create`, which opens a draft. ticketd marks it ready itself, after the user's signed
+  "ready" from the phone. End your turn instead.
+- **Every session only reads tmux**: display-message, the list commands, capture-pane, has-session and
+  show-options, with plain `#{name}` formats. Typing into a pane or a paste buffer writes a prompt that the
+  gate stores as the owner's words, and a `#()` format runs a shell command.
 
 **There is no exception path.** If the checks worktree will not boot, fix the worktree. A slot
 problem is not permission to ship a change nobody has seen, and a skip here would become the way
@@ -360,6 +371,19 @@ The no may carry across the break, so the gate does not judge what the no is abo
 objection:" the line "waive the overlay unit" counts only when you quote the two together. Quote the
 negative piece and the sentence together, or ask the user to restate it as one sentence.
 
+**A reply from the user's phone starts with a fixed lead**, `phone C3: `, which ticketd types. It
+answers that comment and no other, and it counts only in the worktree it was typed in. Quote the words
+after the lead, never the lead. `phone C3: R:IN` and `phone C3: R:OUT` are taps: record them with the
+mark itself as the evidence and the verdict the tap means, and nothing else:
+
+```
+.claude/bin/comment-triage decide --pr <n> --token C3 --verdict fix-in-this-pr --evidence "R:IN"
+```
+
+Any other phone reply on a comment, `phone C3: R:<text>` or plain words, is an instruction: record it as
+`follow-the-user's-words` with the text as the evidence. A reply to another question (`phone Q2: `) never
+decides a comment. A phone reply never backs a waiver. Those stay at the keyboard.
+
 If their message does not say which comment it answers, ask which one. Never guess: a decision
 recorded against the wrong comment is worse than no decision, because nothing later shows it went
 to the wrong place.
@@ -443,7 +467,9 @@ gate finds as whole sentences of what the user typed in this repository, after f
 the difference it answers; it refuses anything else. A `--region` needs that report first, whatever the
 record's kind. A compare of the same design frame that matches ends that frame's window, and the words must
 come after the newest window still open, because a deviation does not say which design it answers. A
-record you make without it is a note: it explains the difference and it lets no mismatch pass.
+record you make without it is a note: it explains the difference and it lets no mismatch pass. A reply
+from the user's phone counts here only when it answers a plan question (`phone Q<n>: `) in this worktree;
+a permission approval, a comment reply or "ready" never backs a design difference.
 `--region` is the page area in pixels that the comparison excuses. Ask the user before you record a
 design difference. Never record one to make a comparison pass.
 
